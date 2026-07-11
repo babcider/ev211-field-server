@@ -20,6 +20,7 @@
     h1 .brand { color: var(--lavender); }
     h1 .version { margin-left: 0.4rem; font-weight: 500; vertical-align: middle; }
     h2 { font-size: 1.05rem; font-weight: 500; margin-top: 1.8rem; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+    h3 { margin: 0 0 0.4rem; font-size: 0.95rem; font-weight: 600; }
     label { display: block; margin: 0.6rem 0 0.2rem; font-weight: 500; font-size: 0.85rem; color: var(--muted); }
     input, select { padding: 0.45rem 0.6rem; background: var(--card); color: var(--text); border: 1px solid var(--iron); border-radius: 12px; box-sizing: border-box; font-size: 0.9rem; }
     input:focus, select:focus { outline: none; border-color: var(--lavender); }
@@ -50,12 +51,13 @@
     .row > div { flex: 1; min-width: 140px; }
     .summary { margin-top: 0.5rem; font-size: 0.85rem; color: var(--dim); }
     .sessionbar { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; margin-top: 0.8rem; padding: 0.6rem 0.7rem; background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+    .password-card { margin-top: 0.75rem; padding: 0.8rem; background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
     .hidden { display: none; }
     .warn { background: rgba(255, 86, 50, 0.12); border: 1px solid rgba(255, 86, 50, 0.4); border-radius: 12px; padding: 0.6rem; font-size: 0.82rem; margin-top: 0.6rem; }
   </style>
 </head>
 <body>
-  <h1><span class="brand">EV211</span> 현장 콘솔 <span class="pill gray version">UI 2026.07.11.3</span></h1>
+  <h1><span class="brand">EV211</span> 현장 콘솔 <span class="pill gray version">UI 2026.07.11.4</span></h1>
 
   <!-- ── 로그인(비밀번호 종류로 자동 분기: 관리자 → 대시보드, 송신자 → 송신 페이지) ── -->
   <section id="loginSec">
@@ -94,6 +96,40 @@
 
   <!-- ── 대시보드 ───────────────────────────────────────── -->
   <section id="dashSec" class="hidden">
+    <h2>비밀번호 관리</h2>
+    <div class="summary">비밀번호는 4~64자의 영문·숫자·기호를 사용하고 서로 다르게 설정하세요.</div>
+    <div class="password-card">
+      <h3>관리자 비밀번호 변경</h3>
+      <div class="row">
+        <div>
+          <label>새 관리자 비밀번호</label>
+          <input id="manageAdminPw" type="password" autocomplete="new-password" />
+        </div>
+        <div>
+          <label>새 관리자 비밀번호 확인</label>
+          <input id="manageAdminPw2" type="password" autocomplete="new-password" />
+        </div>
+        <div style="flex:0"><button id="manageAdminBtn" type="button">관리자 비밀번호 변경</button></div>
+      </div>
+      <div id="manageAdminMsg" class="muted-txt" style="margin-top:0.5rem" role="status" aria-live="polite"></div>
+    </div>
+    <div class="password-card">
+      <h3>송신자 비밀번호 변경</h3>
+      <div class="warn">변경하면 기존 방송·수신·무전기 연결이 모두 끊기고 새 비밀번호로 다시 접속해야 합니다.</div>
+      <div class="row">
+        <div>
+          <label>새 송신자 비밀번호</label>
+          <input id="manageSendPw" type="password" autocomplete="new-password" />
+        </div>
+        <div>
+          <label>새 송신자 비밀번호 확인</label>
+          <input id="manageSendPw2" type="password" autocomplete="new-password" />
+        </div>
+        <div style="flex:0"><button id="manageSendBtn" type="button">송신자 비밀번호 변경</button></div>
+      </div>
+      <div id="manageSendMsg" class="muted-txt" style="margin-top:0.5rem" role="status" aria-live="polite"></div>
+    </div>
+
     <h2>채널 현황 <span id="summary" class="pill gray"></span></h2>
     <table>
       <thead>
@@ -306,9 +342,81 @@
           body: JSON.stringify({ new_password: p1 }),
         }, adminPw);
         // 변경 성공 — 새 비밀번호로 관리자 모드 진입(세대 유지, 방송 중단 없음).
+        $('adminPw').value = p1;
         enterAdminMode(p1);
       } catch (e) {
         $('pwChangeMsg').textContent = '변경 실패: ' + e.message;
+      }
+    };
+
+    function readPasswordPair(firstId, secondId, messageId) {
+      const first = $(firstId).value.trim();
+      const second = $(secondId).value.trim();
+      const message = $(messageId);
+      if (first.length < 4 || first.length > 64) {
+        message.textContent = '비밀번호는 4~64자여야 합니다.';
+        return null;
+      }
+      if (!/^[\x20-\x7e]+$/.test(first)) {
+        message.textContent = '비밀번호는 영문·숫자·기호(ASCII)만 사용할 수 있습니다.';
+        return null;
+      }
+      if (['0000', 'change-me', 'changeme', 'password', 'default'].includes(first.toLowerCase())) {
+        message.textContent = '사용할 수 없는 비밀번호입니다.';
+        return null;
+      }
+      if (first !== second) {
+        message.textContent = '두 입력이 일치하지 않습니다.';
+        return null;
+      }
+      return first;
+    }
+
+    $('manageAdminBtn').onclick = async () => {
+      const nextPassword = readPasswordPair('manageAdminPw', 'manageAdminPw2', 'manageAdminMsg');
+      if (!nextPassword) return;
+      const button = $('manageAdminBtn');
+      button.disabled = true;
+      $('manageAdminMsg').textContent = '관리자 비밀번호 변경 중…';
+      try {
+        await api('/admin/passwords/admin', {
+          method: 'PUT',
+          body: JSON.stringify({ new_password: nextPassword }),
+        }, adminPw);
+        adminPw = nextPassword;
+        $('adminPw').value = nextPassword;
+        $('manageAdminPw').value = '';
+        $('manageAdminPw2').value = '';
+        $('manageAdminMsg').textContent = '관리자 비밀번호가 변경됐습니다. 현재 로그인은 유지됩니다.';
+      } catch (e) {
+        $('manageAdminMsg').textContent = '변경 실패: ' + e.message;
+      } finally {
+        button.disabled = false;
+      }
+    };
+
+    $('manageSendBtn').onclick = async () => {
+      const nextPassword = readPasswordPair('manageSendPw', 'manageSendPw2', 'manageSendMsg');
+      if (!nextPassword) return;
+      if (!confirm('송신자 비밀번호를 변경하면 기존 방송·수신·무전기 연결이 모두 끊깁니다. 계속할까요?')) return;
+      const button = $('manageSendBtn');
+      button.disabled = true;
+      $('manageSendMsg').textContent = '송신자 비밀번호 변경 및 음성 세션 갱신 중…';
+      try {
+        await api('/admin/passwords/send', {
+          method: 'PUT',
+          body: JSON.stringify({ new_password: nextPassword }),
+        }, adminPw);
+        await stopPublishing(false);
+        $('sendPw').value = nextPassword;
+        $('manageSendPw').value = '';
+        $('manageSendPw2').value = '';
+        $('manageSendMsg').textContent = '송신자 비밀번호가 변경됐습니다. 기존 사용자는 새 비밀번호로 다시 접속해야 합니다.';
+        await refresh();
+      } catch (e) {
+        $('manageSendMsg').textContent = '변경 실패: ' + e.message;
+      } finally {
+        button.disabled = false;
       }
     };
 
@@ -762,6 +870,12 @@
       $('sendPw').value = '';
       $('newPw').value = '';
       $('newPw2').value = '';
+      $('manageAdminPw').value = '';
+      $('manageAdminPw2').value = '';
+      $('manageSendPw').value = '';
+      $('manageSendPw2').value = '';
+      $('manageAdminMsg').textContent = '';
+      $('manageSendMsg').textContent = '';
       $('sendPwRow').classList.remove('hidden');
       $('sendWarn').classList.remove('hidden');
       $('sessionSec').classList.add('hidden');
