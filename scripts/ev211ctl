@@ -36,12 +36,26 @@ start_server() {
   compose up -d --build
 }
 
+wait_for_url() {
+  local url="$1" attempts=30
+  while [ "$attempts" -gt 0 ]; do
+    if curl -kfsS --max-time 2 "$url" >/dev/null; then
+      return 0
+    fi
+    attempts=$((attempts - 1))
+    sleep 1
+  done
+  echo "서비스 준비 시간을 초과했습니다: $url" >&2
+  return 1
+}
+
 doctor() {
   compose config >/dev/null
   compose ps
-  curl -fsS --max-time 8 http://localhost:7880/ >/dev/null
+  wait_for_url http://localhost:7880/
+  wait_for_url http://localhost:8880/api/healthz
+  wait_for_url https://localhost:8443/api/healthz
   curl -fsS --max-time 8 http://localhost:8880/api/healthz
-  curl -kfsS --max-time 8 https://localhost:8443/api/healthz >/dev/null
   echo
   echo "진단 통과"
 }
