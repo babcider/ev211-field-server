@@ -159,9 +159,11 @@ update_server() {
   before="$(git -C "$APP_DIR" rev-parse HEAD)"
   echo "업데이트 전 백업: $(do_backup)"
   git -C "$APP_DIR" pull --ff-only
+  install -m 755 "$APP_DIR/scripts/ev211ctl" /usr/local/bin/ev211ctl
   if ! start_server || ! doctor; then
     echo "업데이트 검증 실패. 이전 커밋으로 복구합니다." >&2
     git -C "$APP_DIR" reset --hard "$before"
+    install -m 755 "$APP_DIR/scripts/ev211ctl" /usr/local/bin/ev211ctl
     start_server
     doctor
     exit 1

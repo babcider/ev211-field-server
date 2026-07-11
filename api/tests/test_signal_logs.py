@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import pathlib
 import time
 
 from fastapi.testclient import TestClient
@@ -171,3 +172,13 @@ def test_app_startup_purges_expired_signal_events(state):
     app = create_app(state=state)
     with TestClient(app, base_url="https://testserver"):
         assert state.db.list_signal_events() == []
+
+
+def test_update_installs_current_management_cli_and_restores_it_on_rollback():
+    script = (pathlib.Path(__file__).parents[2] / "scripts" / "ev211ctl").read_text()
+    pull = 'git -C "$APP_DIR" pull --ff-only'
+    install_cli = 'install -m 755 "$APP_DIR/scripts/ev211ctl" /usr/local/bin/ev211ctl'
+    rollback = 'git -C "$APP_DIR" reset --hard "$before"'
+
+    assert script.index(pull) < script.index(install_cli)
+    assert script.index(rollback) < script.rindex(install_cli)
