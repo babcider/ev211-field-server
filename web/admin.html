@@ -55,7 +55,7 @@
   </style>
 </head>
 <body>
-  <h1><span class="brand">EV211</span> 현장 콘솔 <span class="pill gray version">UI 2026.07.11.2</span></h1>
+  <h1><span class="brand">EV211</span> 현장 콘솔 <span class="pill gray version">UI 2026.07.11.3</span></h1>
 
   <!-- ── 로그인(비밀번호 종류로 자동 분기: 관리자 → 대시보드, 송신자 → 송신 페이지) ── -->
   <section id="loginSec">
@@ -667,7 +667,11 @@
           '마이크 연결 시간이 10초를 초과했습니다. 브라우저 마이크 권한과 입력 장치를 확인하세요.',
         );
         await withTimeout(
-          room.localParticipant.publishTrack(localTrack, { name: grant.track_name, source: LK.Track.Source.Microphone }),
+          room.localParticipant.publishTrack(localTrack, {
+            name: grant.track_name,
+            source: LK.Track.Source.Microphone,
+            audioPreset: LK.AudioPresets.musicHighQuality,
+          }),
           10000,
           '마이크 송신 시작 시간이 10초를 초과했습니다.',
         );

@@ -21,7 +21,7 @@ MP3와 메타데이터는 `ev211_field_api_data` Docker volume의 `/data/recordi
 
 ## 용량 계획
 
-현재 인코딩은 48kHz 모노 MP3, 약 128kbps입니다. 한 시간당 대략 60MB가 필요합니다. 녹음 시작 전 서버의 여유 공간을 확인하세요.
+송신 원본은 Opus 최대 96kbps 고음질 프리셋을 사용하며, 서버는 이를 48kHz 모노 MP3, 128kbps로 저장합니다. 한 시간당 대략 60MB가 필요합니다. 녹음 시작 전 서버의 여유 공간을 확인하세요.
 
 ```bash
 df -h
