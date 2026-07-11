@@ -197,6 +197,20 @@
       return body;
     }
 
+    async function withTimeout(promise, timeoutMs, message) {
+      let timer = null;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
     // ── 로그인(비밀번호 종류로 분기) ─────────────────────
     // ① 관리자 비밀번호 → 대시보드(0000 이면 변경 강제). ② 송신자 비밀번호 → 송신 페이지.
     // 송신자 비밀번호 검증은 인터컴 토큰 발급(POST /intercom-tokens)으로 한다 — 부작용 없음.
@@ -591,8 +605,11 @@
       const channelId = parseInt($('sendCh').value, 10);
       if (!sendPw) { log('송신자 비밀번호를 입력하세요'); return; }
       $('startBtn').disabled = true;
+      $('startBtn').textContent = '준비 중…';
+      let localTrack = null;
       try {
         // 채널이 없으면 개설(이미 있으면 409 무시하고 발급 진행).
+        log(`송신 준비: 채널 ${channelId} 확인 중…`);
         try {
           await api('/channels', {
             method: 'POST',
@@ -603,22 +620,45 @@
             }),
           }, sendPw);
           log(`채널 ${channelId} 개설됨`);
-        } catch (e) { /* 이미 개설된 채널이면 발급으로 진행 */ }
+        } catch (e) {
+          if (e.code !== 'max_channels_reached' || e.message !== '이미 개설된 채널입니다.') throw e;
+          log(`기존 채널 ${channelId} 사용`);
+        }
 
+        $('startBtn').textContent = '권한 발급 중…';
+        log('송신 준비: 접속 권한 발급 중…');
         const grant = await api('/publish-tokens', {
           method: 'POST',
           body: JSON.stringify({ channel_id: channelId }),
         }, sendPw);
 
+        $('startBtn').textContent = '서버 연결 중…';
+        log('송신 준비: 음성 서버 연결 중…');
         room = new LK.Room({ adaptiveStream: false, dynacast: false });
-        await room.connect(defaultWsUrl(), grant.token);
-        const track = await LK.createLocalAudioTrack({ deviceId: $('mic').value || undefined });
-        await room.localParticipant.publishTrack(track, { name: grant.track_name, source: LK.Track.Source.Microphone });
+        await withTimeout(
+          room.connect(defaultWsUrl(), grant.token),
+          12000,
+          '음성 서버 연결 시간이 12초를 초과했습니다.',
+        );
+
+        $('startBtn').textContent = '마이크 연결 중…';
+        const selectedMic = $('mic').selectedOptions[0]?.textContent || '기본 마이크';
+        log(`송신 준비: 마이크 연결 중… (${selectedMic})`);
+        localTrack = await withTimeout(
+          LK.createLocalAudioTrack({ deviceId: $('mic').value || undefined }),
+          10000,
+          '마이크 연결 시간이 10초를 초과했습니다. 브라우저 마이크 권한과 입력 장치를 확인하세요.',
+        );
+        await withTimeout(
+          room.localParticipant.publishTrack(localTrack, { name: grant.track_name, source: LK.Track.Source.Microphone }),
+          10000,
+          '마이크 송신 시작 시간이 10초를 초과했습니다.',
+        );
         log(`송신 시작: 채널 ${channelId} (${grant.track_name})`);
 
         // 레벨미터 (WebAudio)
         audioCtx = new AudioContext();
-        const src = audioCtx.createMediaStreamSource(new MediaStream([track.mediaStreamTrack]));
+        const src = audioCtx.createMediaStreamSource(new MediaStream([localTrack.mediaStreamTrack]));
         const analyser = audioCtx.createAnalyser();
         analyser.fftSize = 512;
         src.connect(analyser);
@@ -630,10 +670,22 @@
           $('meterFill').style.width = Math.min(100, (peak / 128) * 200) + '%';
           rafId = requestAnimationFrame(draw);
         })();
+        $('startBtn').textContent = '송신 중';
         $('stopBtn').disabled = false;
+        if (sessionMode === 'admin') refresh();
+        if (sessionMode === 'sender') senderRefresh();
       } catch (e) {
         log('송신 시작 실패: ' + e.message);
+        if (localTrack) {
+          try { localTrack.stop(); } catch (_) { /* 이미 종료된 마이크 */ }
+        }
+        if (room) {
+          try { await room.disconnect(); } catch (_) { /* 연결 전 실패 또는 이미 종료됨 */ }
+          room = null;
+        }
+        $('startBtn').textContent = '송신 시작';
         $('startBtn').disabled = false;
+        $('stopBtn').disabled = true;
       }
     };
 
@@ -644,6 +696,7 @@
       $('meterFill').style.width = '0%';
       if (room) { await room.disconnect(); room = null; }
       if (wasPublishing) log('송신 정지됨');
+      $('startBtn').textContent = '송신 시작';
       $('startBtn').disabled = false;
       $('stopBtn').disabled = true;
       if (refreshAfter) {
