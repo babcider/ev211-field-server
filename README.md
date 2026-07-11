@@ -110,3 +110,5 @@ docker compose --env-file .env \
 ## 라이선스
 
 이 저장소의 코드는 [Apache License 2.0](LICENSE)으로 배포됩니다. 포함된 오픈소스와 Docker 이미지의 고지는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)를 확인하세요.
+
+공개 전 수행한 비밀정보·의존성·컨테이너 검사는 [Public 공개 점검 결과](PUBLIC_RELEASE_AUDIT.md)에 기록돼 있습니다.
