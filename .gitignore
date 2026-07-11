@@ -1,0 +1,30 @@
+# EV211 필드 서버 — 커밋 금지 목록 (자격증명·런타임 데이터)
+# 실제 자격증명은 .env 에만 둔다. .env.example 만 커밋한다.
+.env
+.env.local
+.env.tmp
+
+# Python 개발 산출물
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# 로컬 작업 기록은 공개 배포물에 포함하지 않는다.
+/PLAN.md
+/checklist.md
+/context-notes.md
+
+# Caddy 런타임 데이터(자체서명 CA 개인키·인증서 포함) — 절대 커밋 금지
+caddy_data/
+caddy_config/
+
+# 부하 테스트/로그 산출물
+*.log
+web/tokens.html
+
+# 운영 중 생성하는 백업과 인증서 내보내기 파일
+backups/
+*.tar.gz
+field-root-ca.crt

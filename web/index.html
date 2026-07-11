@@ -1,0 +1,26 @@
+<!-- EV211 내부망 필드 서버 스파이크 진입 페이지 — 송신/수신 테스트 링크 -->
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EV211 필드 서버 스파이크</title>
+  <style>
+    /* Doppler 다크 콘솔 토큰 (docs/DESIGN_Doppler_ev211app.md) */
+    body { font-family: Inter, -apple-system, system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; background: #1c1624; color: #f1f0ec; }
+    a.card { display: block; padding: 1.25rem; margin: 1rem 0; background: #2d2734; border: 1px solid rgba(229, 231, 235, 0.14); border-radius: 20px; text-decoration: none; color: inherit; }
+    a.card:hover { border-color: #b997ff; }
+    h1 { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.02em; }
+    h1 .brand { color: #b997ff; }
+    small { color: #a5a2a5; }
+    code { color: #b997ff; }
+  </style>
+</head>
+<body>
+  <h1><span class="brand">EV211</span> 내부망 필드 서버 — Phase 0 스파이크</h1>
+  <p><small>룸 모델: 세션당 룸 <code>field</code> 1개 + 오디오 트랙 <code>ch-01</code>~<code>ch-15</code></small></p>
+  <a class="card" href="./admin.html"><strong>관리자 대시보드</strong><br /><small>채널 현황 모니터링(10초 갱신) + 실시간 송신 바로미터 + 채널 삭제 + 브라우저 송신</small></a>
+  <a class="card" href="./speak-test.html"><strong>송신 테스트</strong><br /><small>마이크 선택 + 레벨미터 + 채널 트랙 publish</small></a>
+  <a class="card" href="./listen-test.html"><strong>수신 테스트</strong><br /><small>채널(트랙) 선택 → 단일 트랙 구독, 전환 시 이전 트랙 해제</small></a>
+</body>
+</html>

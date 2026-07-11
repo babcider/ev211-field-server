@@ -1,0 +1,17 @@
+# EV211 Field Server Docker Compose 스택을 부팅 시 자동으로 관리한다.
+[Unit]
+Description=EV211 Field Server
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/ev211ctl start
+ExecStop=/usr/local/bin/ev211ctl stop
+TimeoutStartSec=0
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

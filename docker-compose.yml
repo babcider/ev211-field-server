@@ -1,0 +1,110 @@
+# EV211 내부망 필드 서버 도커 구성 — 오디오 전용 LiveKit SFU + Caddy 정적 웹 서빙
+# 이미지 버전은 모두 고정한다(latest 금지).
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.3@sha256:483b8b7b5b0654f91f1e8bdc7b46fcd37fd9911612ecf627f97e3185a89825bd
+    container_name: field-livekit
+    # config-file 방식. 자격증명은 livekit.yaml 이 아니라 LIVEKIT_KEYS 환경변수로 주입한다.
+    # --node-ip 는 클라이언트에 광고할 서버 IP(ICE). FIELD_NODE_IP 미설정 시 127.0.0.1 로컬 폴백.
+    # 현장 배포 시 .env 의 FIELD_NODE_IP 를 반드시 서버 LAN IP 로 설정해야 LAN 단말 ICE 가 성공한다.
+    # entrypoint 가 livekit.template.yaml 의 ${LIVEKIT_API_KEY} 를 치환해 config 를 렌더링한다(결함 #18).
+    entrypoint: ["/livekit-entrypoint.sh"]
+    command: --node-ip ${FIELD_NODE_IP:-127.0.0.1}
+    restart: unless-stopped
+    environment:
+      # livekit.yaml 의 keys 를 비우고, keys 는 이 환경변수로만 주입한다(평문 커밋 방지).
+      LIVEKIT_KEYS: "${LIVEKIT_KEYS}"
+      # webhook api_key 치환용(.env 의 LIVEKIT_API_KEY 와 단일 소스). LIVEKIT_KEYS 의 키와 일치해야 함.
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY}"
+      # RTC 미디어 UDP 범위를 환경변수로 오버라이드 → 아래 published 포트와 항상 일치시킨다.
+      # (LiveKit 는 이 범위 내에서만 ICE 후보를 할당하므로 published 범위와 반드시 같아야 함)
+      LIVEKIT_RTC_PORT_RANGE_START: "${FIELD_UDP_START:-40000}"
+      LIVEKIT_RTC_PORT_RANGE_END: "${FIELD_UDP_END:-45000}"
+    # 내부망 IP로 UDP 미디어를 받으려면 host 네트워크가 가장 단순하고 확실.
+    # (macOS Docker Desktop 에서는 host 네트워크 제약이 있어 포트 매핑으로 대체 — 아래 ports)
+    # Linux 현장 배포는 docker-compose.host.yml 오버레이로 host 네트워크 권장(UDP 프록시 우회).
+    # 기본 40000-45000: macOS ephemeral 범위(49152~)와 겹치지 않아 포트 바인드 충돌을 피한다.
+    # Linux host-mode 에서는 .env 로 FIELD_UDP_START/END 를 50000/60000 으로 넓혀도 됨(충돌 없음).
+    ports:
+      - "7880:7880"                 # signaling ws/http
+      - "7881:7881"                 # TCP 미디어 폴백
+      - "${FIELD_UDP_START:-40000}-${FIELD_UDP_END:-45000}:${FIELD_UDP_START:-40000}-${FIELD_UDP_END:-45000}/udp"  # RTC 미디어 UDP 범위
+    volumes:
+      # 템플릿을 마운트하고 entrypoint 가 렌더링본을 컨테이너 내부에 쓴다(:ro 템플릿 유지).
+      - ./livekit.yaml:/etc/livekit.template.yaml:ro
+      - ./scripts/livekit-entrypoint.sh:/livekit-entrypoint.sh:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7880/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # field-api: 채널·토큰·상태 제어 평면(FastAPI). LiveKit 웹훅 수신·강제·룸 관리 전담.
+  field-api:
+    build: ./api
+    container_name: field-api
+    restart: unless-stopped
+    depends_on:
+      livekit:
+        condition: service_started
+    environment:
+      # LiveKit 자격증명(토큰 발급·RoomService·웹훅 서명 검증). .env 와 일치.
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY}"
+      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET}"
+      # 서버→LiveKit HTTP API(도커 내부 네트워크). RoomService·ListParticipants 호출 대상.
+      LIVEKIT_HOST: "http://livekit:7880"
+      # 서버 녹음 participant가 접속할 내부 signaling URL.
+      LIVEKIT_RTC_URL: "ws://livekit:7880"
+      # 클라이언트(모바일 앱)에 반환할 signaling base URL. 평문 ws 직결 기본(#3) —
+      # LiveKit SDK 가 자체서명 wss 의 TOFU 예외를 공유하지 않아 CA 미설치 단말이 연결
+      # 불가하기 때문. signaling 은 비번 미포함·단기 JWT 만 노출, 미디어는 DTLS-SRTP 로
+      # 항상 암호화. 미설정 시 노드 IP 기반 ws://<IP>:7880 폴백.
+      FIELD_WS_URL: "${FIELD_WS_URL:-ws://${FIELD_NODE_IP:-127.0.0.1}:7880}"
+      # 송신/관리자 비밀번호 — 미설정·기본값이면 field-api 기동 실패(계약).
+      FIELD_SEND_PASSWORD: "${FIELD_SEND_PASSWORD}"
+      FIELD_ADMIN_PASSWORD: "${FIELD_ADMIN_PASSWORD}"
+      FIELD_NODE_IP: "${FIELD_NODE_IP:-127.0.0.1}"
+      FIELD_DB_PATH: "/data/field.db"
+      FIELD_RECORDINGS_PATH: "/data/recordings"
+      MAX_CHANNELS: "${MAX_CHANNELS:-15}"
+      # uvicorn ProxyHeaders 신뢰 프록시(Caddy·도커 브리지) — X-Forwarded-For/Proto 신뢰 대상.
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1}"
+      # field-api 애플리케이션 계층의 신뢰 프록시 목록(https 강제·클라이언트 IP 산출).
+      FIELD_FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1}"
+    volumes:
+      - field_api_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  caddy:
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    container_name: field-caddy
+    restart: unless-stopped
+    depends_on:
+      - field-api
+    environment:
+      # 자체서명 인증서 대상 호스트 + /rtc wss 프록시에 쓰는 서버 LAN IP. 미설정 시 127.0.0.1.
+      FIELD_NODE_IP: "${FIELD_NODE_IP:-127.0.0.1}"
+    ports:
+      # 8880 은 호스트 루프백(127.0.0.1)에만 바인딩한다 — 서버 자신만 도달 가능(D7': localhost getUserMedia OK).
+      # 전 인터페이스에 공개하면 외부 단말이 Host: localhost 로 보내 Caddy localhost 블록의
+      # XFF=127.0.0.1 루프백 인증 예외를 우회할 수 있으므로, 외부 경로는 https:8443 만 남긴다.
+      - "127.0.0.1:8880:8880"   # localhost http (서버 자신 전용, 루프백 바인딩)
+      - "8443:8443"   # 자체서명 https (다른 노트북용, Caddy internal CA)
+      - "80:80"       # 편의 리다이렉트 전용(IP 만 입력 → https:8443 안내, 콘텐츠 없음)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web:/srv/web:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+    name: ev211_field_caddy_data
+  caddy_config:
+    name: ev211_field_caddy_config
+  field_api_data:
+    name: ev211_field_api_data

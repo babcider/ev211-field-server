@@ -1,0 +1,50 @@
+# EV211 내부망 오디오 전용 SFU 설정 — 세션당 룸 1개(field) + 오디오 트랙 15개 모델
+port: 7880          # HTTP/WebSocket signaling
+bind_addresses:
+  - ""              # 모든 인터페이스 리슨 (내부망 IP 접속 허용)
+
+rtc:
+  # UDP 미디어 포트 범위 — 방화벽/공유기에서 반드시 개방 (§9 UDP 점검표)
+  # 101개는 동시 WebRTC 플로우 병목 후보라 확대. 실제 값은 docker-compose 가
+  # LIVEKIT_RTC_PORT_RANGE_START/END(=FIELD_UDP_START/END)로 오버라이드하며 published 포트와 일치시킨다.
+  # 기본: macOS 40000-45000(ephemeral 충돌 회피), Linux host-mode 는 50000-60000 로 확대 가능.
+  port_range_start: 50000
+  port_range_end: 60000
+  # TCP 폴백 (UDP 차단 AP 대비). 내부망이라 TURN은 두지 않음(모드 B 클라우드에서만 TURN 추가)
+  tcp_port: 7881
+  # 단일 노트북 로컬/내부망이므로 후보를 사설 IP로 한정하지 않음(자동 감지)
+  use_external_ip: false
+
+# 오디오 전용: 비디오 코덱을 강제하지 않고, 발행 소스를 마이크로 제한하는 것은 토큰 grant에서 처리.
+# 오탐 방지용 능동 발화자 감지 임계값(§9: on-air 판정은 오디오 레벨 기반).
+# update_interval 단위는 ms(정수). active_level 은 0-127, 낮을수록 민감.
+audio:
+  active_level: 30
+  min_percentile: 15
+  update_interval: 500
+  smooth_intervals: 4
+
+# 자격증명은 이 파일에 두지 않는다. docker-compose 가 .env 의 LIVEKIT_KEYS 를
+# 컨테이너 환경변수(LIVEKIT_KEYS)로 주입한다. 평문 키 커밋 방지.
+
+# 룸 자동 생성 금지: auto_create=true 면 폐기된 세대의 JWT 로도 룸이 되살아난다.
+# 룸은 field-api(Phase 1)가 명시적으로 생성/관리한다. 스파이크 테스트용 생성은 scripts/create-room.sh.
+# empty_timeout 을 크게(24h) 둬 빈 룸이 자동 삭제돼 기발급 토큰이 join 실패하는 것을 막는다(결함 #3).
+room:
+  auto_create: false
+  empty_timeout: 86400      # 빈 룸 유지 24시간 (채널 전환·유휴 중 룸 삭제 방지)
+
+# 웹훅 발송 — participant_joined/track_published/track_unpublished/participant_left 를 field-api 로 보낸다.
+# 기본은 도커 내부 네트워크 직결(http://field-api:8000). api_key 는 서명용(LIVEKIT_KEYS 의 키와 일치).
+# field-api 가 Authorization JWT(이 키/시크릿 서명 + 페이로드 SHA-256)를 검증한다.
+# ${LIVEKIT_API_KEY}·${LIVEKIT_WEBHOOK_URL} 는 entrypoint(livekit-entrypoint.sh)가 치환한다.
+# Linux host-mode(오버레이)에서는 livekit 이 host 네트워크라 도커 DNS(field-api)를 못 쓰므로
+# 오버레이가 LIVEKIT_WEBHOOK_URL 을 Caddy 루프백 경유(http://localhost:8880/api/...)로 바꾼다.
+webhook:
+  api_key: ${LIVEKIT_API_KEY}
+  urls:
+    - ${LIVEKIT_WEBHOOK_URL}
+
+logging:
+  level: info
+  json: false

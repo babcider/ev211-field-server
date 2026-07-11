@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Build source archive
+        run: |
+          archive="ev211-field-server-${GITHUB_REF_NAME}.tar.gz"
+          git archive --format=tar --prefix="ev211-field-server-${GITHUB_REF_NAME}/" HEAD | gzip -9 > "$archive"
+          sha256sum "$archive" > SHA256SUMS
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Attest source archive
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        with:
+          subject-path: ${{ env.ARCHIVE }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$ARCHIVE" SHA256SUMS --verify-tag --generate-notes

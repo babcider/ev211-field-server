@@ -1,0 +1,1924 @@
+# EV211 내부망 현장 서버 field-api 계약 (Phase 0 확정본)
+openapi: 3.1.0
+
+info:
+  title: EV211 field-api
+  version: 0.1.0
+  summary: 내부망 순수 중계 서버(도커) — 채널·토큰·상태 API
+  description: |
+    EV211 내부망 현장 서버(모드 A)의 제어 평면 API다. 순수 중계만 담당하며
+    AI 번역·TTS·동기화는 이 계약의 범위가 아니다. 관리자는 방송·무전기 채널을
+    서버에서 MP3로 녹음하고 완료 파일을 내려받을 수 있다.
+
+    ## 환경 변수 (필수)
+    - `FIELD_SEND_PASSWORD`: 송신 인증 비밀번호. **미설정 또는 기본값이면 서버가
+      기동 자체를 실패**한다. 런타임에 이 API가 "비밀번호 없음" 상태로 응답하는
+      경우는 없다.
+    - `FIELD_ADMIN_PASSWORD`: 관리자(대시보드·takeover) 비밀번호. 동일하게 미설정
+      시 기동 실패.
+    - 두 비밀번호는 서로 달라야 하며, LiveKit API 키/시크릿과 함께 컨테이너 기동
+      전제조건이다. (`.env.example`은 인프라 워커 소관 — 여기서는 계약이 요구하는
+      변수만 명시.)
+
+    ## 룸 모델 (개발계획 §9)
+    - 세션(현장) 전체에 LiveKit **룸 1개**를 사용한다. 룸 이름에는 세대 값을
+      포함한다(예: `field-g<gen>`).
+    - 채널 = 룸 안의 **오디오 트랙 1개**로 표현한다. 트랙명은 `ch-00` ~ `ch-15`
+      (`ch-00`은 Floor/원어 릴레이 전용 채널 0).
+    - 채널 개설 = 해당 트랙 슬롯 확보(채널 0 Floor + 일반 채널 최대 15). 채널
+      종료 = 해당 송신자 **participant 제거(RemoveParticipant) + lease 해제**이며
+      룸 자체는 유지한다(LiveKit RoomService에는 특정 트랙만 서버측 unpublish하는
+      API가 없으므로 participant 제거로 트랙을 내린다). 룸은 **세션 전체 종료 시에만**
+      삭제한다.
+    - SQLite(WAL)가 채널 구성의 **권위 원장**이다. LiveKit은 실시간 상태일 뿐이며,
+      서버 기동 시 원장을 기준으로 LiveKit 상태를 재조정(reconcile)한다(D3').
+
+    ## 전송 계층 정책 — 인증 요청은 HTTPS 전용 (codex 7차 결함 #1)
+    - **비밀번호가 실리는 인증 요청은 HTTPS(wss/https)로만 허용**한다. field-api는
+      프록시(Caddy)가 전달한 `X-Forwarded-Proto`(신뢰 프록시 IP에서 온 경우에만 신뢰)를
+      검사하여, `http`로 도착한 인증 요청은 **`403 https_required`**로 거부한다.
+      대상: `POST /channels`, `DELETE /channels/{id}`, `POST /publish-tokens`,
+      `GET /admin/status`, `POST /admin/channels/{id}/takeover`.
+    - **루프백(서버 자신) 예외 (codex 8차 결함 #4)**: 실제 클라이언트 IP가
+      `127.0.0.1`/`::1`(Caddy 경유 `X-Forwarded-For` 포함)이면 위 인증 요청을 **http로도
+      허용**한다. 서버 노트북 자신에서 뜨는 송신 웹페이지(`http://localhost:8880`)가
+      인증 API를 호출할 때 403으로 막히지 않게 하기 위함이며, 브라우저 `getUserMedia`가
+      `localhost`를 안전 출처로 취급하는 것과 동일 논리다. 평문이라도 트래픽이 노드 밖으로
+      나가지 않으므로 비밀번호 노출 위험이 없다. **비루프백(외부 LAN) IP의 http 인증
+      요청은 그대로 403**으로 거부한다.
+    - **8880 은 호스트 루프백 바인딩 (codex 9차 결함 #1)**: Caddy 의 `http://localhost:8880`
+      블록은 `X-Forwarded-For` 를 `127.0.0.1` 로 고정해 위 루프백 예외를 트리거한다.
+      이 블록이 노출되면 외부 단말이 `Host: localhost` 헤더로 인증을 우회할 수 있으므로,
+      8880 포트는 도커에서 **호스트 `127.0.0.1` 에만 바인딩**(`127.0.0.1:8880:8880`)해
+      **서버 자신만 도달 가능**하게 한다. 외부 LAN 단말의 유일한 경로는 https(:8443)이며,
+      이 경로는 `X-Forwarded-For` 를 고정하지 않아 실제 peer IP 로 위 인증 정책이 적용된다.
+    - **무인증 읽기**(암호 미포함)는 http 도 허용한다: `GET /channels`,
+      `GET /channels/{id}`, `GET /status`, `POST /channels/{id}/subscribe-tokens`,
+      `POST /listeners/heartbeat`, `GET /healthz`, `POST /livekit/webhook`.
+    - 신뢰 프록시 목록은 `FIELD_FORWARDED_ALLOW_IPS`(도커 브리지·Caddy)로 설정하며,
+      이 출처가 아닌 직접 요청은 `X-Forwarded-*`를 무시하고 실제 scheme/peer IP를 쓴다
+      (스푸핑 방지). 클라이언트 IP 산출(rate limit)도 동일 정책을 따른다.
+
+    ## signaling 전송 정책 — 모바일 앱은 평문 ws 직결 (codex 8차 결함 #3)
+    - **정책**: 토큰 응답의 `url`(LiveKit signaling base URL)은 **모바일 앱용으로
+      평문 `ws://<서버IP>:7880` 직결**을 기본으로 한다(`FIELD_WS_URL` 기본값).
+    - **수용 근거(정직한 명시)**: LiveKit 클라이언트 SDK는 앱의 TOFU(첫 접속 신뢰)
+      `IOClient`를 공유하지 않아, CA가 설치되지 않은 단말에서는 자체서명
+      `wss://<IP>:8443` 연결이 인증서 검증 실패로 **연결 자체가 불가능**하다. 반면
+      signaling 채널에는 **비밀번호가 실리지 않으며 단기(TTL 10분/1시간) JWT 토큰만
+      노출**된다. 그리고 **미디어(오디오) 자체는 WebRTC의 DTLS-SRTP로 항상 암호화**되므로,
+      signaling이 평문이어도 통화 내용이 평문으로 전송되지 않는다. 따라서 내부망 전용
+      배포에서 signaling 평문화의 잔여 리스크는 "단기 JWT의 LAN 내 관찰" 뿐이며 수용
+      가능하다.
+    - **비밀번호가 실리는 제어 API는 여전히 HTTPS(:8443) 전용**이다(위 "전송 계층
+      정책" 참조). 즉 평문화 대상은 signaling(미디어 협상)뿐이고 인증 평면이 아니다.
+    - **웹 브라우저(https 페이지)**: mixed content 회피를 위해 기존대로 접속 origin
+      기반 `wss` 프록시(`wss://<host>:8443`)를 쓴다(송신 웹페이지가 `location`에서
+      자체 유도). 즉 토큰 응답의 `url` 필드는 **모바일 앱을 위한 기본값**이며, 웹
+      클라이언트는 이 값 대신 자신의 접속 방식에 맞는 URL을 사용한다.
+
+    ## 인증 모델 (개발계획 D2'·§9)
+    - **수신(subscribe)**: 무인증. 서버 IP만 알면 채널 목록을 조회하고 subscribe
+      토큰을 발급받는다. 토큰 TTL 10분, 클라이언트가 만료 전 자동 갱신한다.
+    - **송신(publish)**: `.env`의 `FIELD_SEND_PASSWORD` 검증에 성공해야 한다(HTTPS 전용).
+      비밀번호 비교는 상수시간(`compare_digest`)으로 수행한다.
+      성공 시 publish 토큰(TTL 1시간)을 발급한다.
+    - subscribe/publish 토큰은 LiveKit 접속에 사용하는 불투명(opaque) JWT다.
+      이 API는 토큰 문자열을 발급·반환할 뿐, 클라이언트는 내부 구조에 의존하지 않는다.
+
+    ## 채널 강제 모델 — 토큰이 아니라 서버가 강제한다 (codex 4차 재설계)
+    - **중요**: LiveKit publish grant는 트랙명을 제한하지 못한다(제한 가능한 것은
+      `canPublishSources`로 소스 종류(microphone/camera 등)를 좁히는 것뿐). 따라서
+      "토큰이 특정 트랙으로 스코프를 제한한다"는 보장은 **불가능**하다. 이 계약은
+      그 주장을 하지 않는다.
+    - publish 토큰은 `canPublishSources=[microphone]`로 발급하고, 대신 **identity
+      규약**으로 채널을 표기한다: `speaker-ch-NN-e<epoch>-g<gen>-n<nonce>`
+      (NN=채널 번호 2자리, epoch=채널 세대, gen=비밀번호 세대, nonce=lease 발급 시
+      서버가 생성하는 짧은 랜덤 문자열). 트랙명은 `ch-NN`로 게시하도록 클라이언트에
+      지시한다.
+    - **nonce(lease 식별자 재사용 방지, codex 5차)**: 같은 epoch·gen에서 lease TTL이
+      만료된 뒤 같은 채널로 재발급하면 nonce가 없을 경우 identity가 완전히 동일해진다.
+      그러면 이전 연결의 지연된 `participant_left` 웹훅이 새로 발급된 lease를 잘못
+      해제할 수 있다. 이를 막기 위해 lease 발급마다 서버가 짧은 랜덤 `nonce`를 새로
+      생성해 identity에 포함한다. lease 해제·웹훅 검증은 커스텀 필드 파싱이 아니라
+      **현재 lease에 저장된 identity 전체 문자열과 정확히 일치**하는지로 판정하므로,
+      nonce가 다른 stale 이벤트는 identity 불일치로 무시된다.
+
+    ### 웹훅 기반 서버측 강제 (경쟁 조건·우회 차단, codex 4차 재설계)
+    - **참가 시점 검증(`participant_joined`)**: `track_published`만으로 강제하면
+      (1) 발행 직후 잘못된 트랙이 잠깐 청취자에게 전달되고, (2) 발행 전이라도 구
+      epoch·구 generation 토큰 소지자가 룸에 머물 수 있다. 이를 막기 위해 field-api는
+      `participant_joined` 웹훅에서 **identity를 즉시 검증**한다: identity가
+      `speaker-ch-NN-e<epoch>-g<gen>-n<nonce>` 규약 형식이 아니거나, epoch가 해당
+      채널의 현재값보다 낮거나, generation이 현재 세대와 다르거나, **해당 채널의
+      현재 lease에 저장된 identity 전체 문자열과 정확히 일치하지 않으면**(nonce가
+      다른 구 토큰 포함 — TTL이 남아 있어도 현재 lease 소유자가 아니다) **트랙
+      발행을 기다리지 않고 즉시 RemoveParticipant** 한다. 즉 어떤 시점이든 룸에
+      송신자로 남을 수 있는 identity는 채널당 현재 lease의 1개뿐이다.
+    - **participant당 발행 트랙 1개 제한**: `track_published` 웹훅에서 (1) 트랙명이
+      identity의 채널(`ch-NN`)과 불일치하거나 비인가 트랙이면 제거하고, (2) 같은
+      participant가 이미 트랙 1개를 발행 중인데 추가 트랙을 발행하면 **초과 발행으로
+      간주해 제거**한다. 즉 같은 identity로 여러 트랙을 밀어넣는 우회를 차단한다.
+    - **웹훅 서명 검증**: 모든 LiveKit 웹훅 요청은 `Authorization` 헤더의 JWT(LiveKit
+      API 키/시크릿으로 서명, 페이로드 SHA-256 해시 포함)를 **검증한 뒤에만** 처리한다.
+      서명 불일치·만료 웹훅은 폐기한다(위조 웹훅으로 강제 로직을 우회할 수 없게 한다).
+    - **멱등·순서 처리**: 웹훅은 재전송·순서 역전이 발생할 수 있으므로, 이벤트 id로
+      **중복 이벤트를 멱등 처리**하고, 같은 participant/트랙에 대해 이벤트의
+      타임스탬프(또는 버전/시퀀스)를 비교해 **더 오래된 이벤트가 최신 상태를 덮어쓰지
+      않도록** 한다. 특히 stale `participant_left`가 새 세션 상태를 지우지 못하게 한다.
+    - **처리 성공 후 커밋(codex 7차 결함 #4 · 8차 결함 #1 재수정)**: 처리 순서는
+      **① 멱등 선-확인(읽기 전용) → ② 이벤트 처리(RemoveParticipant·lease 반영 등)
+      실행 → ③ 처리가 예외 없이 끝난 경우에만 이벤트 id 커밋**이다. 이벤트 id 커밋은
+      **처리 이전에 하지 않는다**(먼저 커밋하면 처리 실패 시 재전송이 멱등으로 조기
+      반환돼 재처리되지 못한다). 처리 중 오류(예: RemoveParticipant 실패)가 나면 이벤트
+      id를 **커밋하지 않고 `503`을 반환**해 LiveKit의 재전송을 유도한다(재전송 시 id가
+      미커밋이므로 재처리된다). 단, 이미 룸에 없어 발생하는 not-found류 제거 오류는 목표
+      상태(제거됨)와 동일하므로 성공으로 간주한다. 반면 **서명 검증 실패(위조·만료)는
+      재시도 유도 없이 `401`로 폐기**한다.
+    - **track_published lease 재검증(codex 7차 결함 #5)**: 모든 `track_published`에서
+      채널 open 상태 + 현재 lease identity **전체 문자열 일치** + 트랙명 규약(`ch-NN`,
+      identity의 채널과 일치, **빈 이름 거부**)을 재검증하고 위반 시 제거한다.
+    - **track_unpublished 처리(codex 7차 결함 #16 · 8차 결함 #5)**: `track_unpublished`
+      웹훅에서 on-air(발행 중) 근사 상태를 해제하되, **떠난 트랙의 identity가 현재 lease
+      identity와 정확히 일치할 때만** 해제한다. takeover·재발급으로 새 송신자가 이미 발행
+      중이면 구 송신자의 지연 도착한 `track_unpublished`가 새 on-air 상태를 지우지 못한다
+      (stale 이벤트 방어).
+    - **기동 reconcile(codex 7차 #16 · 8차 #5·#6 · 9차 #2)**: 서버 기동 시 현재 룸의
+      실제 참가자와 DB lease를 대조한다. (1) 룸에 **실존하지 않는 joined lease는 해제**한다
+      (LiveKit 재시작 후 고착된 lease가 후속 publish를 영구 `409`로 막지 않게 함, #6①).
+      (2) 현재 lease identity와 **일치하고 발행 중인** speaker만 on-air로 복원한다.
+      (3) **대응 lease가 없는(고아) 발행자는 제거**한다(lease 없는 발행 우회 차단, #5).
+    - **reconcile fail-fast (codex 9차 #2)**: `ListParticipants` 조회 실패를 **빈 룸으로
+      간주하지 않는다** — 조회 실패 시 예외를 전파해 **기동을 중단**한다. 빈 룸으로 오판하면
+      실존 발행자를 놓쳐 고아 lease를 방치하거나 활성 송신을 오판할 수 있기 때문이다.
+      고아 발행자의 `RemoveParticipant` 실패도 삼키지 않고 기동을 중단한다(제거 실패 시
+      고아 발행자가 후속 lease 발급을 계속 막으므로). 또한 publish-token 발급 시 joined
+      lease 의 발행자 존재 확인(`ListParticipants`)이 실패하면 **보수적으로 존재로 간주**해
+      lease를 해제하지 않고 `409`(송신 중)를 유지한다(조회 실패로 활성 송신을 끊지 않게 함).
+    - **반복 위반 차단 목록**: 위 검증을 반복적으로 위반하는(구 epoch/구 gen/비인가
+      트랙 재시도) identity는 **메모리 내 차단 목록**에 넣어, 이후 `participant_joined`
+      단계에서 트랙 발행 이전에 즉시 제거한다. 차단 목록은 프로세스 메모리에만 두며
+      세대 변경·서버 재시작 시 초기화된다(순수 중계 범위).
+    - 즉 채널 격리와 중복/우회 차단은 토큰이 아니라 **서명 검증된 웹훅 기반 서버측
+      강제**로 달성한다.
+
+    ### 웹훅 사후 강제의 한계와 수용 근거 (codex 5차, 정직한 명시)
+    - **알려진 한계**: LiveKit 웹훅은 트랙 발행 **후** 비동기로 도착하므로, 잘못된
+      identity·트랙이 제거되기 전까지 **수 초간 잘못된 오디오가 청취자에게 전달될 수
+      있다**. self-hosted LiveKit 구조상 "발행을 사전 차단"하는 훅이 없어(웹훅은
+      사후 통지) 이 짧은 노출을 **완전 선차단하는 것은 불가능**하다. 이 계약은 그런
+      완전 선차단을 주장하지 않는다.
+    - **수용 근거**: (1) 내부망 전용 배포라 위협 주체가 물리적으로 같은 LAN에 있는
+      참가자로 제한된다. (2) publish 토큰은 `FIELD_SEND_PASSWORD` 소지자만 발급받을
+      수 있으므로 임의 외부자가 아니라 비밀번호를 아는 내부자만 이 경로에 접근한다.
+      (3) 잔여 리스크(제거 전 수 초 노출)는 `participant_joined` 단계의 즉시 제거 +
+      반복 위반 identity 차단 목록으로 **탐지 즉시 제거하고 재시도를 차단**해 최소화한다.
+    - 따라서 이 짧은 노출은 **알려진·수용된 잔여 리스크**이며, 완전 제거가 아니라
+      "즉시 탐지·제거 + 재시도 차단"으로 실무상 무해한 수준까지 축소하는 것이 이 설계의
+      명시적 목표다.
+
+    ## on-air 판정 — 숨김 모니터 participant (codex 4차 재설계)
+    - **중요**: LiveKit RoomService의 `ParticipantInfo`에는 `isSpeaking`·`audioLevel`이
+      없어 `ListParticipants` 폴링만으로는 on-air(발화 여부)를 판정할 수 없다.
+    - 대신 field-api는 각 세대 룸에 **숨김 모니터 participant**로 상주한다. 이 모니터는
+      `canSubscribe`만 가지고 `canPublish=false`이며 identity는 `monitor-<uuid>`
+      규약을 따른다. 모니터는 LiveKit의 `active_speakers`/`audioLevel` 이벤트를 받아
+      채널별 on-air를 산출한다.
+    - 모니터 identity(`monitor-*`)는 **웹훅 강제(제거 대상)에서 제외**되고, **listener
+      집계에서도 제외**된다(청취자로 오계수하지 않는다). on-air는 표시용 상태이며 채널
+      점유(lease) 판정과 무관하다.
+
+    ## 토큰 세대(generation) — 비밀번호 변경 시 즉시 무효화 (codex 3차 재설계)
+    - **중요**: LiveKit은 커스텀 claim(예: `gen`)을 검증하지 않으며, self-hosted
+      LiveKit에는 발급된 토큰을 개별 폐기하는 수단이 없다. 따라서 무효화는 claim이
+      아니라 **룸 존재 여부**로 달성한다.
+    - 서버는 현재 유효한 **비밀번호 세대 값**(정수, 1부터 시작)을 보관하고, LiveKit
+      룸 이름에 이를 포함한다(`field-g<gen>`).
+    - **전제(인프라 워커가 적용)**: LiveKit 설정에서 `auto_create: false`로 두어
+      **룸은 field-api만 생성**한다. 임의 토큰 소지자가 존재하지 않는 룸에 join해도
+      룸이 자동 생성되지 않는다.
+    - **룸 지속·재보장(codex 7차 결함 #3)**: 세대 룸은 `empty_timeout`을 크게(24시간)
+      두어 빈 룸이 자동 삭제되지 않게 한다. 그럼에도 룸이 사라진 경우(재시작·타임아웃)
+      기발급 토큰이 join 실패하지 않도록, **모든 토큰 발급 경로**(`POST /publish-tokens`,
+      `POST /channels/{id}/subscribe-tokens`, `POST /admin/.../takeover`)는 발급 직전에
+      현재 세대 룸의 존재를 확인하고 없으면 **재생성(ensure_room)**한다.
+    - 운영자가 비밀번호를 바꾸고 서버를 재시작하면 세대 값이 1 증가하고, field-api가
+      새 세대 룸(`field-g<gen+1>`)을 생성하며 구세대 룸을 삭제한다. 구세대 룸은
+      삭제된 뒤 재생성되지 않으므로(auto-create 비활성), **기발급 publish/subscribe
+      토큰은 다음 접속 시 join 실패로 실제로 무효화**된다.
+    - **세대 무효화 fail-fast(codex 7차 결함 #8)**: 구세대 룸 삭제에 실패하면 폐기된
+      세대 토큰으로 룸이 되살아날 수 있으므로 **기동 자체를 실패**시킨다(부분 무효화
+      상태로 서비스하지 않는다). 세대 변경 시 구세대 lease는 전부 정리한다.
+    - subscribe 토큰도 동일 룸을 대상으로 하므로 세대 변경 후에는 재발급이 필요하다
+      (수신자는 자동 갱신 루프에서 새 토큰을 받는다).
+
+    ## 중복 송신 거부 / takeover — atomic channel lease (codex 3차 재설계)
+    - 한 채널(트랙)은 동시에 **1명만 송신**한다. 이 판정은 오디오 레벨(on-air)이
+      아니라 **채널 lease**로 한다(무음 송신자에게 이중 발급되거나 발급-publish
+      사이 경쟁이 생기지 않도록).
+    - **lease**: publish 토큰 발급 = 해당 채널의 lease 획득이다. lease는 SQLite
+      트랜잭션으로 **원자적**으로 획득한다(동일 채널에 대해 하나만 성립). lease
+      TTL은 publish 토큰 TTL(1시간)과 동일하며, 다음 조건에서 해제된다:
+      (1) 송신자가 `DELETE /channels/{id}`로 명시 종료, (2) participant가 룸에서
+      나가 웹훅(`participant_left`)이 도착, (3) lease TTL 만료. lease가 살아 있는
+      채널에 대한 일반 publish 요청은 `409 channel_busy`로 후발 거부한다.
+    - **채널별 직렬화 락(codex 8차 결함 #2)**: `DELETE /channels/{id}`(close),
+      `POST /admin/channels/{id}/takeover`, `POST /publish-tokens`의 임계 구역은 **채널별
+      `asyncio.Lock`으로 직렬화**한다. 이는 close/takeover가 RemoveParticipant를 `await`
+      하는 사이에 publish가 새 lease를 발급해 방금 정리 중인 채널이 되살아나는 경쟁을
+      막는다. 한 요청은 채널 락을 **하나만** 잡고 그 안에서 다른 락을 잡지 않으므로
+      락 순환(데드락)이 없다. 락 획득 후 채널 상태를 재확인하므로, 락 대기 중 다른
+      요청이 채널을 종료했으면 후발 요청은 종료를 관측한다(`404`).
+    - **활성 송신 lease 만료 방어 + 고착 해제(codex 7차 #6 · 8차 #6②)**:
+      `participant_joined` 웹훅 수신 시 lease에 접속(joined) 마킹을 한다. publish 발급
+      시점에 **joined 상태이고 해당 participant가 아직 룸에 남아 있으면(ListParticipants로
+      실존 확인)**, lease TTL이 만료됐더라도 활성 송신을 끊지 않도록 lease를 **자동
+      연장**하고 새 요청은 `409 channel_busy`로 거부한다(만료 덮어쓰기 금지). 반대로
+      **joined 상태지만 LiveKit 재시작 등으로 룸에 실존하지 않으면** 그 lease를 **해제
+      하고 새 발급을 허용**한다(고착된 joined lease가 영구 `409`를 내지 않게 함, #6②).
+      LiveKit 조회 실패 시에는 보수적으로 '존재'로 간주해 활성 송신을 보호한다.
+    - **미접속 lease grace 해제(codex 7차 결함 #6)**: publish 토큰을 발급받고도
+      LiveKit에 접속하지 못한(joined 안 된) lease는 **발급 후 120초(grace)**가 지나면
+      TTL(1시간)이 남아 있어도 **자동 해제 가능** 상태로 간주한다. 즉 접속 실패 시
+      최대 1시간 동안 채널이 `409`로 잠기는 문제를 막는다. grace 이내에는 접속 대기로
+      보아 여전히 점유(`409`)로 취급한다.
+    - **stale `participant_left` 방어(codex 4·5차)**: `participant_left` 웹훅으로
+      lease를 해제할 때는 **떠난 participant의 identity 전체 문자열
+      (`speaker-ch-NN-e<epoch>-g<gen>-n<nonce>`, epoch·generation·nonce 포함)이 현재
+      lease에 저장된 identity와 정확히 일치할 때만** 해제한다. takeover 등으로 epoch가
+      이미 올라간 뒤 도착한 구 송신자의 stale `participant_left`는 identity가 불일치하고,
+      TTL 만료 후 같은 epoch·gen으로 재발급된 새 lease도 **nonce가 달라** 이전 연결의
+      지연된 `participant_left`와 identity가 불일치하므로 **무시**한다(새로 발급된
+      lease를 잘못 해제하지 않는다). 이는 웹훅 멱등·순서 역전 처리(위 "웹훅 기반 서버측
+      강제")와 함께 적용된다.
+    - **on_air**는 표시용 실시간 상태로만 유지한다(중복 판정에 쓰지 않는다).
+    - **takeover(관리자 전용)**: `POST /admin/channels/{id}/takeover`로만 강제
+      인수한다. takeover 시 서버는 (1) 기존 송신자 participant를 제거하고,
+      (2) 해당 채널의 **channel epoch를 1 증가**시켜 identity 규약에 반영하며
+      (`speaker-ch-NN-e<epoch+1>-g<gen>-n<nonce>`), (3) 새 nonce로 새 lease를 잡아
+      새 publish 토큰을 발급한다. field-api 웹훅은 **구 epoch identity로 접속하는
+      participant를 즉시 제거**하므로, takeover 당한 기존 송신자는 1시간짜리 구 토큰을
+      들고 있어도 재접속이 불가능하다.
+
+    ## on-air 판정 주체 (codex 4차 정정)
+    - on-air(발화 여부) 판정은 field-api가 룸에 상주하는 **숨김 모니터 participant**
+      (`monitor-*`, `canSubscribe`만·`canPublish=false`)가 받는 `active_speakers`/
+      `audioLevel` 이벤트로 산출한다. `ListParticipants`의 `ParticipantInfo`에는
+      `isSpeaking`/`audioLevel`이 없으므로 폴링만으로는 판정할 수 없다(위 "on-air
+      판정 — 숨김 모니터 participant" 참조). 이 값은 상태 표시용이며 채널 점유(lease)
+      판정과 무관하다.
+
+    ## 청취자 수 집계 — 클라이언트 heartbeat (codex 4차 재설계)
+    - **중요**: `ListParticipants`의 `tracks`는 각 participant가 **발행한** 트랙이지
+      **구독한** 트랙이 아니다. 따라서 "구독 정보 집계"로 채널별 청취자 수를 산출하는
+      것은 LiveKit RoomService만으로는 구현할 수 없다.
+    - **기본 방식 = 클라이언트 heartbeat**: 앱·웹 청취 클라이언트가 주기적으로
+      `POST /listeners/heartbeat`에 현재 청취 중인 `channel_id`를 보고한다. field-api는
+      각 heartbeat를 **TTL 30초**로 보관하고, 만료되지 않은 heartbeat를 채널별로 세어
+      청취자 수를 산출한다(30초 내 재보고가 없으면 이탈로 간주). 이 경우
+      `listeners_source`는 `heartbeat`다.
+    - **폴백**: heartbeat 보고가 없어 집계가 불가능하면 발급된 subscribe 토큰 수 기반
+      **근사치**(`token_approximation`)로 대체하고 `listeners_source`로 표기한다.
+      발급 원장·근사 카운트는 TTL(1시간) 경과분을 조회 시 lazy 정리한다(무한 증가 방지).
+    - 숨김 모니터 participant(`monitor-*`)는 청취자 집계에서 제외한다.
+    - **채널 바인딩(codex 7차 결함 #11)**: `listener_id`는 발급 시 특정 `channel_id`에
+      바인딩된다. heartbeat의 `channel_id`가 **발급 시 기록된 채널과 다르면 무시**한다
+      (계수 조작 방지). listener_id 형식(UUIDv4)도 검증하며, 미발급·형식 불일치·채널
+      불일치 heartbeat는 rate limiter 키를 만들지 않고 즉시 무시한다(메모리 고갈 방지).
+      **채널을 바꿔 청취하려면 `POST /channels/{id}/subscribe-tokens`로 새 토큰(=새
+      listener_id)을 발급받는다**(이전 설계의 "같은 listener_id로 다른 채널 보고"는
+      더 이상 허용하지 않는다).
+
+    ## 로그인 보호 (개발계획 §9)
+    - `POST /publish-tokens`(비밀번호 검증)·채널 CRUD·관리자 엔드포인트에 rate limit과
+      실패 잠금을 적용한다. rate limit·실패 잠금의 클라이언트 키는 `X-Forwarded-For`
+      기반 **실제 클라이언트 IP**로 산출한다(프록시 IP로 뭉뚱그리지 않는다, 결함 #2).
+    - rate limit 초과 시 `429`, 잠금 상태에서는 `423`을 반환한다(아래 응답 정의 참조).
+    - 비밀번호가 미설정이거나 기본값이면 **서버가 기동 자체를 실패**하므로,
+      런타임에 이 API가 "비밀번호 없음" 상태로 응답하는 경우는 없다.
+
+    ## 언어 코드
+    - 채널의 언어 코드는 **BCP-47**을 사용한다(예: `ko`, `en`, `ja`, `zh-Hans`).
+    - `label`은 사람이 읽는 표시명(예: "한국어", "English")이며 자유 문자열이다.
+
+servers:
+  - url: http://{host}
+    description: 서버 자신(루프백) 전용 HTTP 접속 — Caddy 8880 은 127.0.0.1 에만 바인딩되어 외부 단말은 도달 불가. 외부는 아래 HTTPS(:8443)를 쓴다.
+    variables:
+      host:
+        default: localhost:8880
+        description: 서버 노트북 자신(루프백). 8880 은 호스트 127.0.0.1 바인딩이라 외부 접근 불가.
+  - url: https://{host}
+    description: 내부망 HTTPS 접속(Caddy internal CA 자체서명, getUserMedia용)
+    variables:
+      host:
+        default: 192.168.0.10
+        description: 현장 도커 서버 IP
+
+tags:
+  - name: channels
+    description: 채널(=트랙) 개설·종료·목록. 채널 0=Floor(원어), 1~15=일반. SQLite 원장이 권위.
+  - name: tokens
+    description: subscribe / publish 토큰 발급.
+  - name: status
+    description: 채널별 on-air·청취자 수 상태.
+  - name: admin
+    description: 관리자 대시보드용 상태 조회 및 takeover.
+  - name: meta
+    description: 헬스체크·서버 메타.
+
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      operationId: getHealth
+      summary: 헬스체크
+      description: 서버·LiveKit 연결 상태를 반환한다. 무인증.
+      security: []
+      responses:
+        "200":
+          description: 정상
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /channels:
+    get:
+      tags: [channels]
+      operationId: listChannels
+      summary: 채널 목록 조회(수신자 진입점)
+      description: |
+        개설된 채널 목록을 반환한다. 무인증 — 수신자 플로우의 첫 왕복이다.
+        SQLite 원장 기준이며, 각 채널의 실시간 on-air·청취자 수도 함께 담아
+        수신 UI가 추가 요청 없이 채널을 고를 수 있게 한다.
+
+        채널별 청취자 수(`listeners`)는 field-api가 클라이언트 **heartbeat**
+        (`POST /listeners/heartbeat`, TTL 30초)를 채널별로 집계하여 산출한다
+        (`listeners_source=heartbeat`). heartbeat 보고가 없어 집계 불가하면 **발급된
+        subscribe 토큰 수 기반 근사치**(`token_approximation`)로 대체하며, 산출 방식은
+        응답의 `listeners_source` 필드로 표기한다. `ListParticipants`의 트랙 정보는
+        발행 트랙이라 구독자 집계에 쓸 수 없다(스펙 서두 "청취자 수 집계" 참조).
+      security: []
+      responses:
+        "200":
+          description: 채널 목록
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [channels, generation, max_channels]
+                properties:
+                  channels:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Channel"
+                  generation:
+                    type: integer
+                    description: 현재 비밀번호 세대 값
+                    example: 1
+                  max_channels:
+                    type: integer
+                    description: 일반 채널 최대 개수(채널 0 Floor는 별도)
+                    example: 15
+                  listeners_source:
+                    type: string
+                    enum: [heartbeat, token_approximation]
+                    description: |
+                      청취자 수 산출 방식. `heartbeat`=클라이언트 heartbeat(TTL 30초)
+                      집계, `token_approximation`=발급 subscribe 토큰 수 기반 근사치 폴백.
+                    example: heartbeat
+    post:
+      tags: [channels]
+      operationId: createChannel
+      summary: 채널 개설(송신자)
+      description: |
+        새 채널(트랙 슬롯)을 개설한다. publish 토큰이 필요하지 않으며, 비밀번호
+        검증은 `POST /publish-tokens`에서 수행한다. 다만 채널 개설 자체가 권한 행위
+        이므로 비밀번호 인증을 요구한다(`sendPassword`).
+
+        - 언어 코드(BCP-47)와 표시 라벨을 지정한다.
+        - 채널 번호 범위는 0~15이다(0=Floor/원어 릴레이, 1~15=일반). 일반 채널이
+          이미 `max_channels`(15)만큼 개설되어 있으면 `409 max_channels_reached`.
+          채널 0은 Floor 전용 슬롯으로 이 한도에 포함되지 않는다.
+        - 동일 언어·라벨 중복 자체는 막지 않는다(운영 판단). 채널 번호로 구분한다.
+      security:
+        - sendPassword: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChannelCreate"
+      responses:
+        "201":
+          description: 개설됨
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Channel"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "409":
+          description: 최대 채널 수 초과
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: max_channels_reached
+                message: 최대 채널 수(15)에 도달했습니다.
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+
+  /channels/{channelId}:
+    parameters:
+      - $ref: "#/components/parameters/ChannelId"
+    get:
+      tags: [channels]
+      operationId: getChannel
+      summary: 채널 상세 조회
+      description: 단일 채널의 정의·실시간 상태를 반환한다. 무인증.
+      security: []
+      responses:
+        "200":
+          description: 채널
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Channel"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [channels]
+      operationId: closeChannel
+      summary: 채널 종료(송신자·관리자)
+      description: |
+        채널을 종료한다. LiveKit RoomService에는 특정 트랙만 서버측 unpublish하는
+        API가 없으므로, 서버는 해당 채널 송신자 **participant를 제거
+        (RemoveParticipant)**하여 트랙을 내리고 채널 **lease를 해제**한 뒤 원장에서
+        채널을 닫힘 상태로 표시한다. **룸은 유지**된다(다른 채널에 영향 없음).
+        비밀번호 인증이 필요하다 — 송신자 비밀번호 또는 관리자 비밀번호를 허용한다
+        (관리자 메뉴의 채널 삭제).
+      security:
+        - sendPassword: []
+        - adminPassword: []
+      responses:
+        "204":
+          description: 종료됨(본문 없음)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+        "502":
+          $ref: "#/components/responses/LiveKitError"
+
+  /channels/{channelId}/subscribe-tokens:
+    parameters:
+      - $ref: "#/components/parameters/ChannelId"
+    post:
+      tags: [tokens]
+      operationId: issueSubscribeToken
+      summary: 수신 토큰 발급(무인증, TTL 10분)
+      description: |
+        지정 채널을 청취하기 위한 subscribe 토큰을 발급한다. 무인증이며 IP만 알면
+        된다. 토큰 TTL은 10분이고, 클라이언트는 `expires_at` 이전에 재호출하여
+        자동 갱신한다.
+
+        토큰은 `canSubscribe=true`의 subscribe 전용 grant로 발급하며 identity는
+        `listener-<uuid>` 규약을 따른다. 클라이언트는 응답의 `track_name`(`ch-NN`)
+        해당 트랙만 구독하도록 지시받는다(LiveKit grant로 구독 트랙을 강제할 수는
+        없으므로 이는 클라이언트 규약이며, 청취자 수 집계는 클라이언트 heartbeat로
+        산출한다 — `GET /channels`·`POST /listeners/heartbeat` 설명 참조).
+
+        **listener_id 서버 발급(codex 5차)**: 응답에는 서버가 생성한 `listener_id`
+        (UUIDv4)가 포함된다. 청취자는 `POST /listeners/heartbeat`에 **반드시 이
+        서버 발급 값**을 그대로 실어 보내야 하며, field-api는 발급 원장에 없는
+        `listener_id`의 heartbeat는 **무시**한다(무인증 + 임의 id 허용으로 인한 계수
+        조작·메모리 고갈 방지). listener_id는 이 토큰과 함께 발급되어 heartbeat 계수의
+        상한을 발급 토큰 수로 묶는다.
+
+        **발급 rate limit(codex 6차)**: 이 엔드포인트 자체도 무인증이므로, 유효
+        listener_id의 무제한 생성을 막기 위해 **출처 IP 기준 rate limit**(예:
+        IP당 분당 10회)을 적용한다. 초과 시 429를 반환한다. 이로써 heartbeat 계수
+        상한("발급 토큰 수")이 실질적인 상한으로 성립한다.
+
+        수신자 플로우 요약: `GET /channels` → 채널 선택 → `POST
+        /channels/{id}/subscribe-tokens` → LiveKit 접속. 갱신 시 이 엔드포인트만
+        반복 호출한다.
+      security: []
+      responses:
+        "200":
+          description: 발급됨
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscribeToken"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: 채널이 종료 상태여서 구독할 수 없음
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: channel_closed
+                message: 종료된 채널입니다.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /listeners/heartbeat:
+    post:
+      tags: [status]
+      operationId: reportListenerHeartbeat
+      summary: 청취자 heartbeat 보고(무인증, 청취자 수 집계용)
+      description: |
+        청취 중인 앱·웹 클라이언트가 현재 듣고 있는 `channel_id`를 주기적으로 보고한다.
+        무인증이다. field-api는 각 heartbeat를 **TTL 30초**로 보관하고, 만료되지 않은
+        heartbeat를 채널별로 세어 청취자 수를 산출한다(`listeners_source=heartbeat`).
+        30초 내 재보고가 없으면 이탈로 간주한다. 클라이언트는 TTL보다 짧은 주기
+        (예: 10~15초)로 재호출해야 계수가 유지된다.
+
+        **listener_id는 서버 발급 값만 유효(codex 5차)**: `listener_id`는
+        `POST /channels/{id}/subscribe-tokens` 응답에서 **서버가 발급한 UUID**여야
+        한다. field-api는 발급 원장에 없는 `listener_id`의 heartbeat를 **조용히
+        무시**한다(계수 반영 안 함). 무인증 + 임의 id 허용 시 발생하던 청취자 수
+        조작·메모리 고갈을 차단하기 위함이며, 이로써 채널당 집계 상한은 해당 채널로
+        발급된 subscribe 토큰 수를 넘지 않는다.
+
+        **채널 바인딩(codex 7차 결함 #11)**: `listener_id`는 발급 시 특정 채널에
+        바인딩되며, heartbeat의 `channel_id`가 **발급 채널과 다르면 무시**한다. 채널을
+        바꿔 청취하려면 새 `subscribe-tokens`를 발급받아 **새 listener_id**로 보고한다
+        (같은 listener_id로 다른 채널 보고는 무시). `listener_id`는 UUIDv4 형식이어야
+        하며, 형식 불일치는 `422`로 거부한다.
+
+        heartbeat도 rate limit 대상이다. **미발급·형식 불일치·채널 불일치 heartbeat는
+        rate limiter 키 생성 없이 즉시 무시**하고, 발급 확인된 listener만 호출 빈도를
+        제한해 과도하면 `429`로 거부한다(결함 #12).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListenerHeartbeat"
+      responses:
+        "204":
+          description: 접수됨(본문 없음)
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /publish-tokens:
+    post:
+      tags: [tokens]
+      operationId: issuePublishToken
+      summary: 송신 토큰 발급(비밀번호 검증, TTL 1시간, 채널 lease 획득)
+      description: |
+        `FIELD_SEND_PASSWORD`(Bearer) 검증 후 지정한 채널에 대한 publish 토큰을
+        발급한다. 토큰 TTL은 1시간이며 `canPublishSources=[microphone]`와 함께
+        **`canSubscribe=true`(duplex)**로 발급한다. 통역사가 자기 채널로 송신하면서
+        동시에 Floor(원어, `ch-00`)를 **수신**해야 하기 때문이다(개발계획 Floor duplex).
+        토큰이 트랙명을 제한하지는 못하므로(LiveKit grant 한계), 채널 격리는 identity
+        규약 + 웹훅 기반 서버측 강제로 달성한다(스펙 서두 "채널 강제 모델" 참조).
+        발급되는 participant identity는 `speaker-ch-NN-e<epoch>-g<gen>-n<nonce>`
+        형식이며, `nonce`는 이 lease 발급 시 서버가 생성하는 짧은 랜덤 문자열이다.
+
+        **채널 lease(원자적 점유)**: 이 발급은 대상 채널의 lease를 SQLite 트랜잭션으로
+        원자적으로 획득하는 것과 동일하다. lease가 이미 살아 있는 채널이면 `409
+        channel_busy`로 후발 거부한다(판정 기준은 on-air 오디오 레벨이 아니라 lease
+        존재 여부다). lease는 명시 종료·participant 이탈 웹훅·TTL 만료로 해제된다.
+
+        **세대 무효화**: 발급 시점의 비밀번호 세대(`generation`)가 응답과 identity에
+        반영된다. 세대가 바뀌면(비번 변경·재시작) 구세대 룸이 삭제되고 재생성되지
+        않으므로(auto-create 비활성) 이 토큰은 다음 접속 시 join 실패로 무효가 된다.
+
+        강제 인수는 관리자 전용 `POST /admin/channels/{id}/takeover`로만 가능하다.
+
+        로그인 보호: rate limit 초과 시 `429`, 연속 실패 잠금 시 `423`.
+
+        송신자 플로우 요약: (채널 개설 `POST /channels`) → `POST /publish-tokens`
+        → LiveKit publish → `DELETE /channels/{id}`로 종료.
+      security:
+        - sendPassword: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishTokenRequest"
+      responses:
+        "200":
+          description: 발급됨
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishToken"
+        "401":
+          description: 비밀번호 불일치
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: invalid_password
+                message: 비밀번호가 올바르지 않습니다.
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: 대상 채널이 이미 송신 중(후발 거부)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: channel_busy
+                message: 이미 송신 중인 채널입니다. 관리자 인수만 가능합니다.
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+
+  /intercom-tokens:
+    post:
+      tags: [tokens]
+      operationId: issueIntercomToken
+      summary: 인터컴(PTT) 토큰 발급(송신자 비밀번호, 전용 룸, 상한 8명)
+      description: |
+        무전기(인터컴) 모드용 토큰을 발급한다. `FIELD_SEND_PASSWORD`(Bearer) 검증 후
+        **전용 룸 `intercom-g<gen>`** 에 `canPublish(마이크만)`+`canSubscribe` 로
+        접속하는 토큰을 발급한다. 예배 릴레이 룸(`field-g<gen>`)과 분리해 에코·권한을
+        단순화하며, 웹훅 강제 규칙(identity·트랙명·lease)은 릴레이 룸 스코프라
+        인터컴 룸에는 적용되지 않는다.
+
+        - identity 는 `intercom-<uuid>`, 트랙명 규약은 `ic-<uuid8>`(응답 `track_name`)
+          이다 — 릴레이 트랙(`ch-NN`)과 구분되어 채널 on-air 집계에 섞이지 않는다.
+        - `name`(선택, 최대 20자)은 참가자 목록에 표시되는 별명으로 JWT name claim 에
+          실린다(제어 문자는 서버가 제거).
+        - **참가 상한 8명**: 이중으로 강제한다. ① 인터컴 룸은 LiveKit
+          `max_participants=8` 로 생성되어 초과 접속을 LiveKit 이 join 시점에 거부한다
+          (미접속 토큰을 다발 발급해도 우회 불가). ② 발급 시점의 룸 참가자 수가 이미
+          상한이면 `409 intercom_full` 로 선제 거부한다. 참가자 수 조회 실패 시 상한
+          우회를 막기 위해 `502 livekit_error` 로 발급을 거부한다(fail-closed).
+        - 클라이언트 권장 사용법: 접속 직후 마이크 트랙을 `track_name` 으로 게시하되
+          **음소거 상태로 유지**하고, PTT 버튼을 누르는 동안만 unmute 한다(발행/중지
+          반복 대비 지연 최소화). 세대 회전 시 인터컴 룸도 폐기되므로 끊기면 재발급
+          후 재접속한다.
+
+        로그인 보호는 publish-tokens 와 동일: rate limit 초과 `429`, 연속 실패 잠금 `423`.
+      security:
+        - sendPassword: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IntercomTokenRequest"
+      responses:
+        "200":
+          description: 발급됨
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntercomToken"
+        "401":
+          description: 비밀번호 불일치
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: invalid_password
+                message: 비밀번호가 올바르지 않습니다.
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "409":
+          description: 인터컴 정원 초과
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: intercom_full
+                message: 인터컴 정원(8명)이 가득 찼습니다.
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+        "502":
+          $ref: "#/components/responses/LiveKitError"
+
+  /intercom/channels:
+    get:
+      tags: [tokens]
+      operationId: listIntercomChannels
+      summary: 무전기 채널 목록(송신자 비밀번호 인증 — 무전기 진입 검증 겸용)
+      description: |
+        개설된 무전기 채널 목록을 반환한다. `FIELD_SEND_PASSWORD`(Bearer) 인증이
+        필요하므로, 앱의 무전기 진입 시 이 호출로 송신자 비밀번호를 검증한다.
+        각 채널은 `id`·`name`(생성자가 정한 이름)·`has_password`(입장 비밀번호 여부)를
+        포함한다. 채널 룸은 `intercom-g<gen>-c<id>` 이며 세대 회전·재시작 시 폐기된다.
+      security:
+        - sendPassword: []
+      responses:
+        "200":
+          description: 채널 목록
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntercomChannelList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+    post:
+      tags: [tokens]
+      operationId: createIntercomChannel
+      summary: 무전기 채널 개설(이름 필수·비밀번호 선택, 상한 8개)
+      description: |
+        무전기 채널을 개설한다. `channel_name`(필수, 생성자가 정함)과 선택적
+        `password`(설정 시 입장에 요구)를 받는다. 가장 낮은 빈 슬롯(0~7)에 배정하며,
+        최대 8개 초과 시 `409 max_channels_reached`. 채널 룸은 LiveKit
+        `max_participants=8` 로 생성된다. 채널 비밀번호는 채널별 랜덤 salt + scrypt 로
+        해시 저장되고(임시 채널 격리용, 재시작·세대회전 시 폐기), 상수시간 비교로 검증된다.
+      security:
+        - sendPassword: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IntercomChannelCreate"
+      responses:
+        "201":
+          description: 개설됨
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntercomChannel"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "409":
+          description: 최대 채널 수 도달
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: max_channels_reached
+                message: 무전기 채널이 최대 개수(8)에 도달했습니다.
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+        "502":
+          $ref: "#/components/responses/LiveKitError"
+
+  /intercom/channels/{channelId}/tokens:
+    parameters:
+      - name: channelId
+        in: path
+        required: true
+        description: 무전기 채널 번호(0~7).
+        schema:
+          type: integer
+          minimum: 0
+          maximum: 7
+        example: 0
+    post:
+      tags: [tokens]
+      operationId: enterIntercomChannel
+      summary: 무전기 채널 입장 토큰(송신자 비밀번호 + 채널 비밀번호)
+      description: |
+        지정 무전기 채널에 입장하는 토큰을 발급한다. `FIELD_SEND_PASSWORD`(Bearer)에
+        더해, **채널에 비밀번호가 설정돼 있으면 본문 `password` 가 일치해야** 한다
+        (불일치·누락 시 `401 invalid_channel_password`). 채널 비밀번호는 `(IP, 채널)` 단위
+        연속 실패 잠금이 적용되어, 반복 실패 시 `423 locked` 로 온라인 대입을 막는다.
+        `name` 은 참가자 목록 표시 별명(선택). 채널 룸 `intercom-g<gen>-c<id>` 에 마이크
+        발행+구독 토큰을 발급하며, 참가 상한 8명 초과 시 `409 intercom_full`. 응답은
+        `IntercomToken` 에 `channel_id` 가 포함된 형태다.
+      security:
+        - sendPassword: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IntercomChannelEnter"
+      responses:
+        "200":
+          description: 발급됨
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntercomToken"
+        "401":
+          description: 송신자 비밀번호 또는 채널 비밀번호 불일치
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: invalid_channel_password
+                message: 채널 비밀번호가 올바르지 않습니다.
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: 채널 정원 초과
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: intercom_full
+                message: 채널 정원(8명)이 가득 찼습니다.
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+        "502":
+          $ref: "#/components/responses/LiveKitError"
+
+  /status:
+    get:
+      tags: [status]
+      operationId: getStatus
+      summary: 전체 상태 조회
+      description: |
+        모든 채널의 실시간 상태(on-air·청취자 수)와 서버 요약을 반환한다.
+        on-air는 **트랙 발행(송신) 중** 근사값이다(구현 편차). 원래 계약은 숨김 모니터
+        participant의 오디오 레벨 기반 발화 판정을 규정했으나, 서버 프로세스에 숨김
+        WebRTC participant를 상주시키는 것이 불안정해 `track_published`~
+        `track_unpublished` 웹훅 기반 **발행 여부**로 근사한다(무음 마이크도 발행 중이면
+        on-air=true로 오탐 가능 — 표시용). 청취자 수는 클라이언트 heartbeat 집계로
+        산출한다. on-air는 표시용 상태이며 채널 점유(lease) 판정과 무관하다. 무인증 —
+        수신/대시보드 공용.
+      security: []
+      responses:
+        "200":
+          description: 상태
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusSummary"
+
+  /admin/status:
+    get:
+      tags: [admin]
+      operationId: getAdminStatus
+      summary: 관리자 상태 조회
+      description: |
+        `/status`와 동일한 채널 상태에 더해 관리자용 상세(각 채널의 현재 송신자
+        식별자, publisher 접속 시각, 세대 값 등)를 포함한다. 관리자 인증 필요.
+      security:
+        - adminPassword: []
+      responses:
+        "200":
+          description: 관리자 상태
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminStatusSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+
+  /admin/monitor-tokens:
+    post:
+      tags: [admin]
+      operationId: issueMonitorToken
+      summary: 관리자 모니터 토큰 발급(대시보드 바로미터용)
+      description: |
+        관리자 대시보드(웹·앱)가 채널별 송신 오디오 레벨(바로미터)을 실시간 표시할 수
+        있도록, 현재 세대 룸에 **hidden participant** 로 접속하는 토큰을 발급한다.
+
+        grant 는 `hidden=true` + `canSubscribe=true` + `canPublish=false` 다. LiveKit
+        은 **active-speaker(오디오 레벨) 신호를 subscriber 데이터채널로만** 전달하므로
+        (E2E 검증 — 구독 없는 참가자에게는 신호가 오지 않음) 클라이언트는 트랙을
+        구독하되 **재생(attach)하지 않는** 규약이다. 트랙 구독 자체는 무인증
+        `subscribe-tokens` 로도 가능하므로 이 grant 는 권한 확장이 아니다. participant
+        identity 는 `monitor-<uuid>` 형식이며, 이 접두사는 웹훅 강제·청취자 집계
+        대상에서 제외된다(identity 규약).
+
+        TTL 은 600초(10분)이며 접속 시점에만 검증된다(접속 유지 중 만료 무해).
+        끊기면 새 토큰을 재발급받아 재접속한다. 초기 관리자 비밀번호(0000) 상태에서는
+        `403 must_change_password` 로 거부한다(룸 접속 자격 차단, 13차 #3 규약).
+      security:
+        - adminPassword: []
+      responses:
+        "200":
+          description: 발급됨
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MonitorToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+
+  /admin/intercom/status:
+    get:
+      tags: [admin]
+      operationId: getAdminIntercomStatus
+      summary: 관리자 무전기 채널 현황 조회
+      description: 무전기 채널별 실제 사용자 수와 참가자 표시 이름을 반환한다. hidden 관리자 모니터와 서버 녹음 participant는 집계에서 제외한다.
+      security:
+        - adminPassword: []
+      responses:
+        "200":
+          description: 무전기 채널 현황
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminIntercomStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+
+  /admin/intercom/channels/{channelId}/monitor-tokens:
+    parameters:
+      - $ref: "#/components/parameters/IntercomChannelId"
+    post:
+      tags: [admin]
+      operationId: issueIntercomMonitorToken
+      summary: 무전기 채널 모니터 토큰 발급
+      description: 지정한 무전기 룸에 hidden·subscribe-only participant로 접속해 관리자 대시보드가 채널 오디오 레벨을 표시하게 한다.
+      security:
+        - adminPassword: []
+      responses:
+        "200":
+          description: 발급됨
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MonitorToken"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+
+  /admin/recordings:
+    get:
+      tags: [admin]
+      operationId: listRecordings
+      summary: 진행 중·완료 녹음 목록
+      security:
+        - adminPassword: []
+      responses:
+        "200":
+          description: 녹음 목록
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecordingList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [admin]
+      operationId: startRecording
+      summary: 채널별 서버 MP3 녹음 시작
+      description: 방송 채널의 지정 트랙 또는 무전기 채널의 모든 참가자 트랙을 서버에서 구독한다. 무전기 트랙은 단일 모노 스트림으로 혼합한다. 관리자 브라우저가 닫혀도 녹음은 유지된다.
+      security:
+        - adminPassword: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordingStartRequest"
+      responses:
+        "201":
+          description: 녹음 시작됨
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Recording"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: 해당 채널이 이미 녹음 중
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /admin/recordings/{recordingId}/stop:
+    parameters:
+      - $ref: "#/components/parameters/RecordingId"
+    post:
+      tags: [admin]
+      operationId: stopRecording
+      summary: 녹음 종료와 MP3 확정
+      security:
+        - adminPassword: []
+      responses:
+        "200":
+          description: 녹음 종료됨
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Recording"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/recordings/{recordingId}/download:
+    parameters:
+      - $ref: "#/components/parameters/RecordingId"
+    get:
+      tags: [admin]
+      operationId: downloadRecording
+      summary: 완료된 MP3 다운로드
+      security:
+        - adminPassword: []
+      responses:
+        "200":
+          description: MP3 파일
+          content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/channels/{channelId}/takeover:
+    parameters:
+      - $ref: "#/components/parameters/ChannelId"
+    post:
+      tags: [admin]
+      operationId: takeoverChannel
+      summary: 채널 송신 강제 인수(takeover)
+      description: |
+        이미 송신 중인 채널을 관리자가 강제 인수한다. 서버는 (1) 기존 송신자
+        participant를 제거하고, (2) 해당 채널의 **channel epoch를 1 증가**시켜
+        identity 규약(`speaker-ch-NN-e<epoch>-g<gen>-n<nonce>`)에 반영하며, (3) 기존
+        lease를 해제하고 새 nonce로 새 lease를 잡아 요청자에게 새 publish 토큰
+        (TTL 1시간)을 발급한다.
+
+        epoch 증가로 인해 takeover 당한 기존 송신자가 아직 유효한 구 토큰(최대 1시간)
+        으로 재접속하더라도, identity의 epoch가 현재값보다 낮으므로 field-api 웹훅이
+        해당 participant를 **즉시 제거**한다. 이것이 중복 송신 상황에서 유일하게
+        허용되는 인수 경로다(개발계획 §9).
+      security:
+        - adminPassword: []
+      responses:
+        "200":
+          description: 인수 성공, 새 publish 토큰 발급
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+        "502":
+          $ref: "#/components/responses/LiveKitError"
+
+  /admin/passwords/admin:
+    put:
+      tags: [admin]
+      operationId: changeAdminPassword
+      summary: 관리자 비밀번호 변경
+      description: |
+        관리자 비밀번호를 변경한다. 변경 값은 서버 DB(settings)에 영속되어 재시작
+        후에도 유지되며, 환경변수(`FIELD_ADMIN_PASSWORD`)보다 우선한다. **세대는
+        유지**된다(진행 중 방송을 끊지 않음). 초기 배포 기본값은 `0000` 을 권장한다.
+        송신자 비밀번호와 같은 값은 400 으로 거부한다.
+      security:
+        - adminPassword: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordChange"
+      responses:
+        "204":
+          description: 변경됨(본문 없음)
+        "400":
+          description: 사용할 수 없는 비밀번호(송신자 비밀번호와 동일 등)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "422":
+          description: 형식 오류(4자 미만·64자 초과·금지 값)
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+
+  /admin/passwords/send:
+    put:
+      tags: [admin]
+      operationId: changeSendPassword
+      summary: 송신자 비밀번호 변경(세대 회전)
+      description: |
+        송신자 비밀번호를 변경한다. 변경 값은 서버 DB(settings)에 영속되어 재시작
+        후에도 유지되며, 환경변수(`FIELD_SEND_PASSWORD`)보다 우선한다.
+
+        **세대(generation)가 회전**되어 기존 발급 토큰·룸·lease 가 전부 폐기된다
+        (§9 토큰 세대 계약). 진행 중인 송신·수신이 모두 끊기므로 방송 중 변경은
+        피해야 한다. 관리자 비밀번호와 같은 값은 400 으로 거부한다.
+      security:
+        - adminPassword: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordChange"
+      responses:
+        "204":
+          description: 변경됨(본문 없음). 세대가 1 증가한다.
+        "400":
+          description: 사용할 수 없는 비밀번호(관리자 비밀번호와 동일 등)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "422":
+          description: 형식 오류(4자 미만·64자 초과·금지 값)
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+
+components:
+  securitySchemes:
+    sendPassword:
+      type: http
+      scheme: bearer
+      description: |
+        송신 비밀번호(`FIELD_SEND_PASSWORD`)를 Bearer 자격으로 전달한다.
+        `Authorization: Bearer <FIELD_SEND_PASSWORD>`.
+    adminPassword:
+      type: http
+      scheme: bearer
+      description: |
+        관리자 비밀번호(`FIELD_ADMIN_PASSWORD`)를 Bearer 자격으로 전달한다.
+        `Authorization: Bearer <FIELD_ADMIN_PASSWORD>`.
+
+  parameters:
+    ChannelId:
+      name: channelId
+      in: path
+      required: true
+      description: 채널 번호(0~15). 0=Floor. 트랙명 `ch-00`~`ch-15`에 대응한다.
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 15
+      example: 1
+    IntercomChannelId:
+      name: channelId
+      in: path
+      required: true
+      description: 무전기 채널 번호(0~7).
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 7
+      example: 0
+    RecordingId:
+      name: recordingId
+      in: path
+      required: true
+      description: 서버가 발급한 녹음 UUID.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Unauthorized:
+      description: 인증 실패(비밀번호 누락·불일치)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            code: unauthorized
+            message: 인증이 필요합니다.
+    NotFound:
+      description: 대상 없음
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            code: not_found
+            message: 채널을 찾을 수 없습니다.
+    UnprocessableEntity:
+      description: 요청 본문 검증 실패
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            code: validation_error
+            message: 언어 코드는 BCP-47 형식이어야 합니다.
+    RateLimited:
+      description: |
+        요청 빈도 초과(로그인 rate limit). `Retry-After`(초)로 재시도 시점을 안내한다.
+      headers:
+        Retry-After:
+          description: 재시도까지 대기해야 하는 초
+          schema:
+            type: integer
+          example: 30
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            code: rate_limited
+            message: 시도가 너무 많습니다. 잠시 후 다시 시도하세요.
+    LiveKitError:
+      description: |
+        LiveKit RoomService 호출 실패(예: RemoveParticipant). 상태 전이를 하지 않고
+        보상 가능하도록 `502 livekit_error`를 반환하므로 클라이언트는 재시도할 수 있다
+        (codex 7차 결함 #7 — fail-open 방지).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            code: livekit_error
+            message: LiveKit 참가자 제거에 실패했습니다. 다시 시도하세요.
+    HttpsRequired:
+      description: |
+        인증(비밀번호) 요청이 http로 도착함. HTTPS 전용이므로 `403 https_required`로
+        거부한다(codex 7차 결함 #1).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            code: https_required
+            message: 이 요청은 HTTPS(wss/https)로만 허용됩니다.
+    Locked:
+      description: |
+        연속 인증 실패로 잠금됨. `Retry-After`(초)로 잠금 해제 시점을 안내한다.
+      headers:
+        Retry-After:
+          description: 잠금 해제까지 남은 초
+          schema:
+            type: integer
+          example: 300
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            code: locked
+            message: 실패가 반복되어 일시 잠금되었습니다. 잠시 후 다시 시도하세요.
+
+  schemas:
+    Error:
+      type: object
+      description: 공통 에러 응답 스키마
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: 기계 판독용 에러 코드(snake_case)
+          example: channel_busy
+        message:
+          type: string
+          description: 사람이 읽는 한국어 메시지
+          example: 이미 송신 중인 채널입니다.
+        details:
+          type: object
+          description: 선택적 부가 정보(필드별 검증 오류 등)
+          additionalProperties: true
+
+    Health:
+      type: object
+      required: [status, generation]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: 서버 상태. LiveKit 연결 불가 시 degraded.
+        livekit:
+          type: string
+          enum: [connected, disconnected]
+          description: LiveKit 연결 상태
+        generation:
+          type: integer
+          description: 현재 비밀번호 세대 값
+          example: 1
+
+    LanguageCode:
+      type: string
+      description: BCP-47 언어 코드
+      pattern: "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
+      examples: [ko, en, ja, zh-Hans]
+
+    PasswordChange:
+      type: object
+      description: 비밀번호 변경 요청(관리자·송신자 공용)
+      required: [new_password]
+      properties:
+        new_password:
+          type: string
+          minLength: 4
+          maxLength: 64
+          description: 새 비밀번호(4~64자, 흔한 기본값 금지)
+          example: "0211"
+
+    ChannelCreate:
+      type: object
+      required: [language, label]
+      properties:
+        language:
+          $ref: "#/components/schemas/LanguageCode"
+        label:
+          type: string
+          description: 표시용 라벨(사람이 읽는 이름)
+          minLength: 1
+          maxLength: 40
+          example: 한국어
+        channel_id:
+          type: integer
+          minimum: 0
+          maximum: 15
+          description: |
+            원하는 채널 번호를 지정할 수 있다(생략 시 서버가 가장 낮은 빈 일반
+            슬롯을 배정). Floor(원어) 릴레이는 채널 0(`ch-00`)을 명시 지정한다.
+
+    Channel:
+      type: object
+      required: [channel_id, track_name, language, label, state, on_air, listeners]
+      properties:
+        channel_id:
+          type: integer
+          minimum: 0
+          maximum: 15
+          description: 채널 번호(0=Floor)
+          example: 1
+        track_name:
+          type: string
+          description: LiveKit 트랙명(`ch-00`~`ch-15`, ch-00=Floor)
+          example: ch-01
+        language:
+          $ref: "#/components/schemas/LanguageCode"
+        label:
+          type: string
+          example: 한국어
+        state:
+          type: string
+          enum: [open, closed]
+          description: 원장 기준 채널 상태(open=개설, closed=종료)
+          example: open
+        on_air:
+          type: boolean
+          description: |
+            실시간 송신(발행) 중 근사값. 구현 편차상 오디오 레벨(발화)이 아니라
+            **트랙 발행 여부**(track_published~track_unpublished 웹훅)로 근사한다.
+            무음 마이크도 발행 중이면 true 로 오탐할 수 있다(표시용, lease 판정과 무관).
+          example: true
+        listeners:
+          type: integer
+          minimum: 0
+          description: 현재 구독자 수
+          example: 12
+        created_at:
+          type: string
+          format: date-time
+
+    SubscribeToken:
+      type: object
+      required: [token, room, url, expires_at, ttl_seconds, channel_id, track_name, listener_id]
+      properties:
+        token:
+          type: string
+          description: LiveKit subscribe용 불투명 JWT
+        listener_id:
+          type: string
+          format: uuid
+          description: |
+            서버가 발급한 청취자 식별자(UUIDv4). 청취자는 `POST /listeners/heartbeat`에
+            이 값을 그대로 보고해야 하며, 서버는 발급되지 않은 id의 heartbeat를
+            무시한다. 이 바인딩이 heartbeat 계수 조작·메모리 고갈을 차단한다.
+          example: 8f3c2b7a-1e4d-4a9b-9c2e-0d5f6a7b8c90
+        room:
+          type: string
+          description: 접속할 LiveKit 룸 이름(현재 세대 반영)
+          example: field-g1
+        url:
+          type: string
+          description: |
+            LiveKit signaling WebSocket **base URL**(모바일 앱용 기본값, codex 8차 #3).
+            기본은 평문 `ws://<서버IP>:7880` 직결이다 — LiveKit SDK가 자체서명 wss의
+            TOFU 예외를 공유하지 않아 CA 미설치 단말이 `wss://IP:8443`에 연결할 수 없기
+            때문. signaling에는 비밀번호가 실리지 않고 단기 JWT만 노출되며, 미디어는
+            WebRTC DTLS-SRTP로 항상 암호화된다. LiveKit SDK가 base URL에 `/rtc`를 스스로
+            붙이므로 **접미사 없이** base URL만 넘긴다. 웹 브라우저(https 페이지)는
+            mixed content 회피를 위해 이 값 대신 `location` 기반 `wss://<host>:8443`
+            프록시를 사용한다.
+          example: ws://192.168.0.10:7880
+        channel_id:
+          type: integer
+          description: 이 토큰이 구독하도록 스코프된 채널 번호
+          example: 1
+        track_name:
+          type: string
+          description: |
+            클라이언트가 구독해야 하는 LiveKit 트랙명(`ch-00`~`ch-15`). 구독 트랙을
+            grant로 강제할 수 없으므로 이는 클라이언트 규약이다.
+          example: ch-01
+        ttl_seconds:
+          type: integer
+          description: 토큰 유효 기간(초). 수신은 600(10분).
+          example: 600
+        expires_at:
+          type: string
+          format: date-time
+          description: 만료 시각. 클라이언트는 이 이전에 갱신한다.
+
+    MonitorToken:
+      type: object
+      description: 관리자 모니터(hidden participant) 접속 토큰 — 대시보드 바로미터용
+      required: [token, room, url, identity, ttl_seconds, expires_at]
+      properties:
+        token:
+          type: string
+          description: LiveKit 접속용 불투명 JWT(hidden, 구독 전용·발행 불가)
+        room:
+          type: string
+          description: 접속할 LiveKit 룸 이름(현재 세대 반영)
+          example: field-g1
+        url:
+          type: string
+          description: |
+            LiveKit signaling WebSocket base URL(SubscribeToken.url 과 동일 규약).
+            웹 브라우저(https 페이지)는 mixed content 회피를 위해 이 값 대신
+            `location` 기반 `wss://<host>:8443` 프록시를 사용한다.
+          example: ws://192.168.0.10:7880
+        identity:
+          type: string
+          description: 발급된 participant identity(`monitor-<uuid>`)
+          example: monitor-8f3c2b7a-1e4d-4a9b-9c2e-0d5f6a7b8c90
+        ttl_seconds:
+          type: integer
+          description: 토큰 유효 기간(초). 600(10분).
+          example: 600
+        expires_at:
+          type: string
+          format: date-time
+          description: 만료 시각. 끊기면 재발급 후 재접속한다.
+
+    AdminIntercomStatus:
+      type: object
+      required: [channels, generation, total_participants]
+      properties:
+        generation:
+          type: integer
+        total_participants:
+          type: integer
+          minimum: 0
+        channels:
+          type: array
+          items:
+            type: object
+            required: [channel_id, name, participants, participant_count, available]
+            properties:
+              channel_id:
+                type: integer
+                minimum: 0
+                maximum: 7
+              name:
+                type: string
+              participant_count:
+                type: integer
+                minimum: 0
+              available:
+                type: boolean
+              participants:
+                type: array
+                items:
+                  type: object
+                  required: [identity, name]
+                  properties:
+                    identity:
+                      type: string
+                    name:
+                      type: string
+
+    RecordingStartRequest:
+      type: object
+      required: [kind, channel_id]
+      properties:
+        kind:
+          type: string
+          enum: [relay, intercom]
+        channel_id:
+          type: integer
+          minimum: 0
+          maximum: 15
+
+    Recording:
+      type: object
+      required: [recording_id, kind, channel_id, label, room, started_at, active]
+      properties:
+        recording_id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [relay, intercom]
+        channel_id:
+          type: integer
+        label:
+          type: string
+        room:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: [string, "null"]
+          format: date-time
+        duration_seconds:
+          type: [number, "null"]
+        size_bytes:
+          type: [integer, "null"]
+        active:
+          type: boolean
+
+    RecordingList:
+      type: object
+      required: [active, recordings]
+      properties:
+        active:
+          type: array
+          items:
+            $ref: "#/components/schemas/Recording"
+        recordings:
+          type: array
+          items:
+            $ref: "#/components/schemas/Recording"
+
+    IntercomTokenRequest:
+      type: object
+      description: 인터컴 토큰 발급 요청(본문 생략 가능)
+      properties:
+        name:
+          type: string
+          maxLength: 20
+          description: 참가자 목록에 표시되는 별명(선택). 제어 문자는 서버가 제거한다.
+          example: 통역사1
+
+    IntercomToken:
+      type: object
+      description: 인터컴(PTT) 접속 토큰 — 전용 룸 intercom-g<gen>
+      required: [token, room, url, identity, track_name, ttl_seconds, expires_at]
+      properties:
+        token:
+          type: string
+          description: LiveKit 접속용 불투명 JWT(마이크 발행+구독)
+        room:
+          type: string
+          description: 접속할 인터컴 룸 이름(현재 세대 반영)
+          example: intercom-g1
+        url:
+          type: string
+          description: LiveKit signaling WebSocket base URL(SubscribeToken.url 과 동일 규약)
+          example: ws://192.168.0.10:7880
+        identity:
+          type: string
+          description: 발급된 participant identity(`intercom-<uuid>`)
+          example: intercom-8f3c2b7a-1e4d-4a9b-9c2e-0d5f6a7b8c90
+        track_name:
+          type: string
+          description: 게시할 마이크 트랙명(`ic-<uuid8>`). 릴레이 트랙(ch-NN)과 구분된다.
+          example: ic-8f3c2b7a
+        ttl_seconds:
+          type: integer
+          description: 토큰 유효 기간(초). 3600(1시간). 접속 시점에만 검증된다.
+          example: 3600
+        expires_at:
+          type: string
+          format: date-time
+          description: 만료 시각. 끊기면 재발급 후 재접속한다.
+        channel_id:
+          type: integer
+          minimum: 0
+          maximum: 7
+          description: 채널 입장 토큰인 경우 무전기 채널 번호(기본 룸 발급 시 생략).
+          example: 0
+
+    IntercomChannel:
+      type: object
+      description: 무전기 채널 항목
+      required: [channel_id, name, has_password]
+      properties:
+        channel_id:
+          type: integer
+          minimum: 0
+          maximum: 7
+          description: 무전기 채널 번호(0~7)
+          example: 0
+        name:
+          type: string
+          description: 채널 이름(생성자가 정함)
+          example: 본부
+        has_password:
+          type: boolean
+          description: 입장 비밀번호가 설정돼 있는지
+          example: false
+
+    IntercomChannelList:
+      type: object
+      required: [channels, generation, max_channels]
+      properties:
+        channels:
+          type: array
+          items:
+            $ref: "#/components/schemas/IntercomChannel"
+        generation:
+          type: integer
+          example: 1
+        max_channels:
+          type: integer
+          description: 무전기 채널 최대 개수(8)
+          example: 8
+
+    IntercomChannelCreate:
+      type: object
+      required: [channel_name]
+      properties:
+        channel_name:
+          type: string
+          minLength: 1
+          maxLength: 30
+          description: 채널 이름(생성자가 정함). 제어 문자는 서버가 제거한다.
+          example: 본부
+        password:
+          type: [string, "null"]
+          maxLength: 64
+          description: |
+            선택적 입장 비밀번호(4자 이상 ASCII). 설정하면 입장 시 요구된다.
+            빈 문자열·생략·null 은 비밀번호 없음으로 취급.
+          example: open123
+
+    IntercomChannelEnter:
+      type: object
+      description: 무전기 채널 입장 요청(본문 생략 가능)
+      properties:
+        name:
+          type: string
+          maxLength: 20
+          description: 참가자 목록에 표시되는 별명(선택)
+          example: 요원1
+        password:
+          type: string
+          maxLength: 64
+          description: 채널 비밀번호(채널에 설정돼 있으면 필수)
+          example: open123
+
+    ListenerHeartbeat:
+      type: object
+      required: [channel_id, listener_id]
+      properties:
+        channel_id:
+          type: integer
+          minimum: 0
+          maximum: 15
+          description: 현재 청취 중인 채널 번호(0=Floor).
+          example: 1
+        listener_id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          description: |
+            `POST /channels/{id}/subscribe-tokens` 응답에서 **서버가 발급한**
+            청취자 식별자(UUIDv4, 36자). 서버는 발급 원장에 없는 값을 무시하므로
+            클라이언트가 임의로 생성한 id는 계수되지 않는다. 이 바인딩으로 채널당
+            집계 상한이 발급 토큰 수로 제한된다.
+          example: 8f3c2b7a-1e4d-4a9b-9c2e-0d5f6a7b8c90
+      description: 청취자 heartbeat 보고 본문(listener_id는 서버 발급 UUID만 유효)
+
+    PublishTokenRequest:
+      type: object
+      required: [channel_id]
+      properties:
+        channel_id:
+          type: integer
+          minimum: 0
+          maximum: 15
+          description: |
+            송신할 단일 채널 번호(0=Floor). 채널 격리는 토큰이 아니라 identity
+            규약 + 웹훅 서버측 강제로 달성한다(스펙 서두 참조).
+          example: 1
+
+    PublishToken:
+      type: object
+      required: [token, room, url, channel_id, track_name, identity, generation, epoch, ttl_seconds, expires_at]
+      properties:
+        token:
+          type: string
+          description: |
+            LiveKit publish용 불투명 JWT. `canPublishSources=[microphone]`와
+            `canSubscribe=true`(duplex)로 발급된다. duplex인 이유는 통역사가 자기
+            채널로 송신하면서 동시에 Floor(원어, `ch-00`)를 수신해야 하기 때문이다.
+            토큰 자체는 트랙명을 제한하지 못하므로(LiveKit grant 한계), 채널 격리는
+            아래 `identity` 규약 + field-api 웹훅 강제로 달성한다.
+        room:
+          type: string
+          description: 접속할 LiveKit 룸 이름(세대 포함)
+          example: field-g1
+        url:
+          type: string
+          description: |
+            signaling **base URL**(모바일 앱용 기본값, codex 8차 #3). 기본은 평문
+            `ws://<서버IP>:7880` 직결이다(자체서명 wss는 CA 미설치 단말에서 연결 불가).
+            signaling에는 비밀번호가 실리지 않고 단기 JWT만 노출되며, 미디어는 WebRTC
+            DTLS-SRTP로 항상 암호화된다. LiveKit SDK가 `/rtc`를 스스로 붙이므로 접미사
+            없이 base URL만 넘긴다. 웹 브라우저(https 페이지)는 `location` 기반
+            `wss://<host>:8443` 프록시를 사용한다(mixed content 회피).
+          example: ws://192.168.0.10:7880
+        channel_id:
+          type: integer
+          example: 1
+        track_name:
+          type: string
+          description: 클라이언트가 이 트랙명으로 게시해야 한다(불일치 시 웹훅이 제거).
+          example: ch-01
+        identity:
+          type: string
+          description: |
+            발급된 participant identity. `speaker-ch-NN-e<epoch>-g<gen>-n<nonce>`
+            형식이며 field-api 웹훅이 이 값으로 채널·epoch·세대를 검증한다. `nonce`는
+            lease 발급마다 서버가 생성하는 짧은 랜덤 문자열로, TTL 만료 후 같은
+            epoch·gen 재발급 시 identity가 재사용되어 이전 연결의 지연된
+            `participant_left`가 새 lease를 해제하는 것을 막는다. lease 해제·웹훅 검증은
+            이 identity **전체 문자열의 정확 일치**로 판정한다.
+          example: speaker-ch-01-e1-g1-nA1b2C3
+        epoch:
+          type: integer
+          minimum: 1
+          description: |
+            채널 세대(channel epoch). takeover 시마다 1 증가한다. 이보다 낮은 epoch
+            identity로 접속하면 웹훅이 즉시 제거하므로, 구 토큰 재접속이 차단된다.
+          example: 1
+        generation:
+          type: integer
+          description: |
+            토큰에 반영된 비밀번호 세대 값. 서버 세대가 이보다 커지면(비번 변경)
+            구세대 룸이 삭제·재생성 불가이므로 이 토큰은 join 실패로 무효다.
+          example: 1
+        ttl_seconds:
+          type: integer
+          description: 토큰 유효 기간(초). 송신은 3600(1시간).
+          example: 3600
+        expires_at:
+          type: string
+          format: date-time
+
+    StatusSummary:
+      type: object
+      required: [generation, channels]
+      properties:
+        generation:
+          type: integer
+          example: 1
+        total_listeners:
+          type: integer
+          minimum: 0
+          description: 전체 구독자 수 합계
+          example: 42
+        listeners_source:
+          type: string
+          enum: [heartbeat, token_approximation]
+          description: 청취자 수 산출 방식(`heartbeat` 집계 또는 근사치 폴백 표기).
+          example: heartbeat
+        channels:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChannelStatus"
+
+    ChannelStatus:
+      type: object
+      required: [channel_id, language, label, state, on_air, listeners]
+      properties:
+        channel_id:
+          type: integer
+          example: 1
+        language:
+          $ref: "#/components/schemas/LanguageCode"
+        label:
+          type: string
+          example: 한국어
+        state:
+          type: string
+          enum: [open, closed]
+        on_air:
+          type: boolean
+          description: |
+            실시간 송신(발행) 중 근사값. 오디오 레벨이 아니라 트랙 발행 여부로 근사한다
+            (구현 편차). 표시용이며 채널 점유(lease) 판정과 무관하다.
+        listeners:
+          type: integer
+          minimum: 0
+
+    AdminStatusSummary:
+      type: object
+      required: [generation, channels]
+      properties:
+        generation:
+          type: integer
+          example: 1
+        total_listeners:
+          type: integer
+          minimum: 0
+        channels:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminChannelStatus"
+
+    AdminChannelStatus:
+      allOf:
+        - $ref: "#/components/schemas/ChannelStatus"
+        - type: object
+          properties:
+            publisher_identity:
+              type: [string, "null"]
+              description: |
+                현재 송신자 LiveKit participant identity(없으면 null).
+                `speaker-ch-NN-e<epoch>-g<gen>-n<nonce>` 형식.
+              example: speaker-ch-01-e1-g1-nA1b2C3
+            publisher_joined_at:
+              type: [string, "null"]
+              format: date-time
+              description: 현재 송신자 접속 시각
+            epoch:
+              type: integer
+              minimum: 1
+              description: 현재 채널 세대(channel epoch). takeover마다 증가.
+              example: 1
+            lease_held:
+              type: boolean
+              description: 채널 lease 점유 여부(true=송신 슬롯 점유 중).
+              example: true
+            lease_expires_at:
+              type: [string, "null"]
+              format: date-time
+              description: 현재 lease 만료 시각(없으면 null).

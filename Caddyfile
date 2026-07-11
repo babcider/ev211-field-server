@@ -1,0 +1,85 @@
+# EV211 내부망 정적 웹 서빙 + LiveKit signaling wss 프록시 — localhost http(:8880) / 자체서명 https(:8443)
+# {$FIELD_NODE_IP} 는 docker-compose 가 .env 에서 주입한다(미설정 시 127.0.0.1).
+{
+	# 관리 API 비활성(내부망 정적 서빙만)
+	admin off
+	# 자체서명 CA(internal). 다른 노트북은 최초 1회 루트 인증서 신뢰 설치(README 참고).
+	# IP 직접 접속(https://<서버IP>:8443)은 SNI 가 비어 Caddy 가 인증서를 선택하지 못하고
+	# TLS alert 80(internal error)으로 끊는다. 빈 SNI 의 기본 인증서를 서버 LAN IP 로 지정한다.
+	default_sni {$FIELD_NODE_IP:127.0.0.1}
+}
+
+# 경로 0: 편의 리다이렉트 — 브라우저에 IP 만 입력(http :80)하면 https:8443 으로 안내한다.
+# 콘텐츠·프록시 없음(리다이렉트 전용). http://IP:8443 처럼 포트를 직접 잘못 친 경우는
+# TLS 포트라 구제 불가("Client sent an HTTP request to an HTTPS server") — IP 만 입력 안내.
+http://:80 {
+	redir https://{host}:8443{uri} permanent
+}
+
+# 공통 보안 헤더 스니펫(1차 검수 ⓓ): MIME 스니핑·클릭재킹 방지, 리퍼러 최소화, 서버 배너 제거.
+(security_headers) {
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}
+
+# 경로 1: 서버 노트북 자신 — localhost http. getUserMedia 는 localhost 에서 보안 컨텍스트로 허용됨.
+http://localhost:8880 {
+	import security_headers
+	# LiveKit signaling ws 프록시 (http 경로에서는 ws). 웹 페이지 기본값이 여기로 붙는다.
+	handle /rtc* {
+		# 기본은 도커 브리지 DNS(livekit:7880). Linux host-mode 오버레이는
+		# LIVEKIT_UPSTREAM=host.docker.internal:7880 으로 오버라이드한다.
+		reverse_proxy {$LIVEKIT_UPSTREAM:livekit:7880}
+	}
+	# field-api 제어 평면 프록시. /api 프리픽스를 스트립해 field-api:8000 으로 전달한다.
+	# X-Forwarded-Proto=http 를 명시 전달. 단 이 사이트 블록은 Host=localhost 로만 도달
+	# 가능한 **서버 노트북 자신(루프백)** 전용 경로이므로, X-Forwarded-For 를 127.0.0.1 로
+	# 고정해 field-api 의 루프백 http 인증 예외(codex 8차 #4)를 트리거한다. 외부 LAN 단말은
+	# 이 블록(:8880 localhost)에 도달할 수 없고 IP:8443(https) 경로만 쓴다.
+	handle_path /api/* {
+		reverse_proxy field-api:8000 {
+			header_up X-Forwarded-Proto http
+			header_up X-Forwarded-For 127.0.0.1
+		}
+	}
+	handle {
+		root * /srv/web
+		file_server
+		encode gzip
+	}
+}
+
+# 경로 2: 다른 내부망 단말 — 자체서명 https. Caddy internal CA 로 TLS 발급.
+# 명시적 호스트명 필요(bare :8443 은 빈 SNI 로 internal CA 발급 실패).
+# 인증서 대상에 서버 LAN IP({$FIELD_NODE_IP})를 포함해야 외부 노트북이 IP 로 접속 가능.
+localhost:8443, 127.0.0.1:8443, {$FIELD_NODE_IP:127.0.0.1}:8443 {
+	tls internal
+	import security_headers
+	# 루트(/) 진입은 관리자 대시보드로 즉시 이동 — 스파이크 메뉴(index.html)를 노출하지 않는다.
+	# redir 의 단일 인자가 "/"로 시작하면 경로 매처로 오인되므로 `*` 매처를 명시한다.
+	handle / {
+		redir * /admin.html
+	}
+	# LiveKit signaling wss 프록시. https 페이지는 mixed content 회피 위해 wss(/rtc)로 접속.
+	handle /rtc* {
+		# 기본은 도커 브리지 DNS(livekit:7880). Linux host-mode 오버레이는
+		# LIVEKIT_UPSTREAM=host.docker.internal:7880 으로 오버라이드한다.
+		reverse_proxy {$LIVEKIT_UPSTREAM:livekit:7880}
+	}
+	# field-api 제어 평면 프록시(https). /api 프리픽스를 스트립해 field-api:8000 으로 전달한다.
+	# X-Forwarded-Proto=https 를 명시 전달 → field-api 가 인증(비번) 요청을 허용(계약).
+	handle_path /api/* {
+		reverse_proxy field-api:8000 {
+			header_up X-Forwarded-Proto https
+		}
+	}
+	handle {
+		root * /srv/web
+		file_server
+		encode gzip
+	}
+}

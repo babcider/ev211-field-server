@@ -1,0 +1,7 @@
+# field-api 테스트에만 사용하는 파이썬 의존성 목록
+-r requirements.txt
+pytest==8.3.4
+pytest-asyncio==0.25.0
+httpx==0.28.1
+openapi-spec-validator==0.7.2
+pip-audit==2.10.1

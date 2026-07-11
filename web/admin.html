@@ -1,0 +1,627 @@
+<!-- EV211 관리자 대시보드 — 방송·무전기 모니터링, 서버 MP3 녹음·다운로드, 브라우저 송신 -->
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EV211 현장 콘솔</title>
+  <!-- CDN 금지: 로컬 번들 UMD 사용 -->
+  <script src="./vendor/livekit-client.umd.js"></script>
+  <style>
+    /* Doppler 다크 콘솔 토큰 (docs/DESIGN_Doppler_ev211app.md) — 어두운 현장용 */
+    :root {
+      --canvas: #1c1624; --card: #2d2734; --elevated: #3a3340;
+      --text: #f1f0ec; --muted: #d0c9c4; --dim: #a5a2a5;
+      --iron: #55505b; --border: rgba(229, 231, 235, 0.14);
+      --lavender: #b997ff; --green: #00f575; --ember: #ff5632;
+    }
+    body { font-family: Inter, -apple-system, system-ui, sans-serif; max-width: 860px; margin: 1.5rem auto; padding: 0 1rem; background: var(--canvas); color: var(--text); }
+    h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.02em; }
+    h1 .brand { color: var(--lavender); }
+    h2 { font-size: 1.05rem; font-weight: 500; margin-top: 1.8rem; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+    label { display: block; margin: 0.6rem 0 0.2rem; font-weight: 500; font-size: 0.85rem; color: var(--muted); }
+    input, select { padding: 0.45rem 0.6rem; background: var(--card); color: var(--text); border: 1px solid var(--iron); border-radius: 12px; box-sizing: border-box; font-size: 0.9rem; }
+    input:focus, select:focus { outline: none; border-color: var(--lavender); }
+    input { width: 100%; }
+    /* 버튼 문법: 기본(주 액션)=green·검정 글자, danger=ember·검정 글자 */
+    button { padding: 0.5rem 1rem; border: 0; border-radius: 12px; background: var(--green); color: #000; cursor: pointer; font-size: 0.9rem; font-weight: 600; }
+    button:disabled { background: var(--elevated); color: var(--dim); cursor: not-allowed; }
+    button.danger { background: var(--ember); }
+    button.small { padding: 0.25rem 0.6rem; font-size: 0.8rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 0.75rem; font-size: 0.88rem; }
+    th, td { text-align: left; padding: 0.45rem 0.5rem; border-bottom: 1px solid var(--border); }
+    th { background: var(--card); color: var(--dim); font-size: 0.8rem; font-weight: 500; letter-spacing: 0.03em; }
+    .onair { color: var(--ember); font-weight: 700; }
+    .muted-txt { color: var(--dim); }
+    .pill { display: inline-block; padding: 0.05rem 0.5rem; border-radius: 999px; font-size: 0.75rem; background: var(--elevated); }
+    .pill.red { background: var(--ember); color: #000; font-weight: 600; }
+    .pill.green { background: var(--green); color: #000; font-weight: 600; }
+    .pill.gray { background: var(--elevated); color: var(--dim); }
+    #meter { height: 14px; background: var(--elevated); border-radius: 8px; overflow: hidden; margin-top: 0.5rem; }
+    #meterFill { height: 100%; width: 0%; background: var(--green); transition: width 0.08s; }
+    /* 채널별 송신 바로미터(실시간 오디오 레벨) — active-speaker 신호로 갱신 */
+    .chmeter { display: inline-block; vertical-align: middle; width: 90px; height: 10px; background: var(--elevated); border-radius: 6px; overflow: hidden; margin-left: 0.5rem; }
+    .chmeter-fill { display: block; height: 100%; width: 0%; background: var(--green); transition: width 0.15s; }
+    #log { margin-top: 1rem; padding: 0.7rem; background: var(--card); border: 1px solid var(--border); color: var(--muted); border-radius: 12px; font-size: 0.8rem; white-space: pre-wrap; max-height: 180px; overflow-y: auto; }
+    .row { display: flex; gap: 0.6rem; align-items: flex-end; flex-wrap: wrap; }
+    .row > div { flex: 1; min-width: 140px; }
+    .summary { margin-top: 0.5rem; font-size: 0.85rem; color: var(--dim); }
+    .hidden { display: none; }
+    .warn { background: rgba(255, 86, 50, 0.12); border: 1px solid rgba(255, 86, 50, 0.4); border-radius: 12px; padding: 0.6rem; font-size: 0.82rem; margin-top: 0.6rem; }
+  </style>
+</head>
+<body>
+  <h1><span class="brand">EV211</span> 현장 콘솔</h1>
+
+  <!-- ── 로그인(비밀번호 종류로 자동 분기: 관리자 → 대시보드, 송신자 → 송신 페이지) ── -->
+  <section id="loginSec">
+    <label>비밀번호 (관리자 또는 송신자)</label>
+    <div class="row">
+      <div><input id="adminPw" type="password" autocomplete="current-password" placeholder="관리자 비밀번호 → 대시보드 · 송신자 비밀번호 → 송신 페이지" /></div>
+      <div style="flex:0"><button id="loginBtn">접속</button></div>
+    </div>
+    <div id="loginMsg" class="muted-txt" style="margin-top:0.5rem"></div>
+  </section>
+
+  <!-- ── 초기 관리자 비밀번호(0000) 변경 강제 ─────────────── -->
+  <section id="pwChangeSec" class="hidden">
+    <h2>관리자 비밀번호 변경</h2>
+    <div class="warn">초기 비밀번호(0000)로 접속했습니다. 보안을 위해 <b>새 비밀번호로 변경해야</b> 관리자 기능(채널 삭제·바로미터 등)을 사용할 수 있습니다.</div>
+    <div class="row">
+      <div>
+        <label>새 비밀번호 (4자 이상, 영문·숫자·기호)</label>
+        <input id="newPw" type="password" autocomplete="new-password" />
+      </div>
+      <div>
+        <label>새 비밀번호 확인</label>
+        <input id="newPw2" type="password" autocomplete="new-password" />
+      </div>
+      <div style="flex:0"><button id="pwChangeBtn">변경</button></div>
+    </div>
+    <div id="pwChangeMsg" class="muted-txt" style="margin-top:0.5rem"></div>
+  </section>
+
+  <!-- ── 대시보드 ───────────────────────────────────────── -->
+  <section id="dashSec" class="hidden">
+    <h2>채널 현황 <span id="summary" class="pill gray"></span></h2>
+    <table>
+      <thead>
+        <tr><th>채널</th><th>언어(라벨)</th><th>송신자 상태</th><th>청취자</th><th>녹음</th><th></th></tr>
+      </thead>
+      <tbody id="chRows"><tr><td colspan="6" class="muted-txt">불러오는 중…</td></tr></tbody>
+    </table>
+
+    <h2>무전기 채널 <span id="intercomSummary" class="pill gray"></span></h2>
+    <table>
+      <thead>
+        <tr><th>채널</th><th>이름</th><th>참가자</th><th>채널 음성</th><th>녹음</th></tr>
+      </thead>
+      <tbody id="intercomRows"><tr><td colspan="5" class="muted-txt">불러오는 중…</td></tr></tbody>
+    </table>
+
+    <h2>서버 녹음 파일</h2>
+    <div class="summary">녹음은 서버에서 계속되므로 이 브라우저를 닫아도 유지됩니다.</div>
+    <table>
+      <thead>
+        <tr><th>종류</th><th>채널</th><th>시작</th><th>길이</th><th>크기</th><th></th></tr>
+      </thead>
+      <tbody id="recordingRows"><tr><td colspan="6" class="muted-txt">불러오는 중…</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- ── 송신자 모드: 채널 현황(읽기 전용) ─────────────────── -->
+  <section id="senderSec" class="hidden">
+    <h2>채널 현황 <span id="senderSummary" class="pill gray"></span></h2>
+    <table>
+      <thead>
+        <tr><th>채널</th><th>언어(라벨)</th><th>상태</th><th>청취자</th></tr>
+      </thead>
+      <tbody id="senderRows"><tr><td colspan="4" class="muted-txt">불러오는 중…</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- ── 웹 송신(수신 없음) — 관리자·송신자 공용 ───────────── -->
+  <section id="sendSec" class="hidden">
+    <h2>브라우저 송신</h2>
+    <div class="warn" id="sendWarn">송신에는 <b>송신자 비밀번호</b>가 필요합니다. 이 페이지는 송신 전용이며 수신(모니터링 청취) 기능은 없습니다.</div>
+    <div class="row">
+      <div id="sendPwRow">
+        <label>송신자 비밀번호</label>
+        <input id="sendPw" type="password" autocomplete="off" />
+      </div>
+      <div>
+        <label>채널 번호 (0=Floor)</label>
+        <select id="sendCh"></select>
+      </div>
+      <div>
+        <label>언어 코드 (새 채널 개설 시)</label>
+        <input id="sendLang" value="ko" />
+      </div>
+      <div>
+        <label>라벨 (새 채널 개설 시)</label>
+        <input id="sendLabel" value="Korean (한국어)" />
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>마이크 장치</label>
+        <select id="mic" style="width:100%"></select>
+      </div>
+      <div style="flex:0"><button id="startBtn">송신 시작</button></div>
+      <div style="flex:0"><button id="stopBtn" class="danger" disabled>송신 정지</button></div>
+    </div>
+    <div id="meter"><div id="meterFill"></div></div>
+    <div id="log">대기 중…</div>
+  </section>
+
+  <script>
+    const LK = window.LivekitClient;
+    const $ = (id) => document.getElementById(id);
+    const logEl = $('log');
+    function log(msg) { logEl.textContent = new Date().toLocaleTimeString() + '  ' + msg + '\n' + logEl.textContent; }
+
+    // 페이지가 Caddy(:8443 https / :8880 localhost)에서 서빙되므로 same-origin /api 를 쓴다.
+    const API = '/api';
+    let adminPw = '';
+    let pollTimer = null;
+    let recordingState = { active: [], recordings: [] };
+
+    // ⚠ LiveKit SDK 는 base URL 에 스스로 `/rtc` 를 붙인다(스파이크 페이지와 동일 규약).
+    function defaultWsUrl() {
+      const h = location.hostname;
+      if (location.protocol === 'https:') return `wss://${h}:8443`;
+      if (h === 'localhost' || h === '127.0.0.1') return 'ws://localhost:7880';
+      return `wss://${h}:8443`;
+    }
+
+    async function api(path, opts = {}, password = null) {
+      const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+      if (password) headers['Authorization'] = 'Bearer ' + password;
+      const res = await fetch(API + path, { ...opts, headers });
+      if (res.status === 204) return null;
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const err = new Error(body.message || ('HTTP ' + res.status));
+        err.code = body.code;
+        throw err;
+      }
+      return body;
+    }
+
+    // ── 로그인(비밀번호 종류로 분기) ─────────────────────
+    // ① 관리자 비밀번호 → 대시보드(0000 이면 변경 강제). ② 송신자 비밀번호 → 송신 페이지.
+    // 송신자 비밀번호 검증은 인터컴 토큰 발급(POST /intercom-tokens)으로 한다 — 부작용 없음.
+    $('loginBtn').onclick = async () => {
+      const pw = $('adminPw').value.trim();
+      if (!pw) return;
+      $('loginMsg').textContent = '확인 중…';
+      try {
+        await api('/admin/status', {}, pw);
+        if (pw === '0000') {
+          // 초기 관리자 비밀번호 — 서버가 특권 작업을 거부하므로 변경을 먼저 강제한다.
+          adminPw = pw;
+          $('loginSec').classList.add('hidden');
+          $('pwChangeSec').classList.remove('hidden');
+        } else {
+          enterAdminMode(pw);
+        }
+        return;
+      } catch (e) {
+        // 잠금·율제한은 송신자 시도로 넘어가지 않고 그대로 안내한다(추가 실패 기록 방지).
+        if (e.code === 'locked' || e.code === 'rate_limited' || e.code === 'https_required') {
+          $('loginMsg').textContent = '접속 실패: ' + e.message;
+          return;
+        }
+      }
+      try {
+        await api('/intercom-tokens', { method: 'POST', body: '{}' }, pw);
+        enterSenderMode(pw);
+      } catch (e) {
+        $('loginMsg').textContent = '접속 실패: 관리자·송신자 비밀번호가 모두 일치하지 않습니다. (' + e.message + ')';
+      }
+    };
+    $('adminPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+
+    // 관리자 모드: 상세 현황(삭제·바로미터) + 브라우저 송신(송신 비번 별도 입력).
+    function enterAdminMode(pw) {
+      adminPw = pw;
+      $('loginSec').classList.add('hidden');
+      $('pwChangeSec').classList.add('hidden');
+      $('dashSec').classList.remove('hidden');
+      $('sendSec').classList.remove('hidden');
+      refresh();
+      pollTimer = setInterval(refresh, 10000); // 청취자 수 등 현황은 10초 주기 갱신.
+      startMonitor(); // 채널별 송신 바로미터(실시간 레벨) 연결.
+      loadMics();
+    }
+
+    // 송신자 모드: 읽기 전용 현황 + 채널 개설·송신(비밀번호 자동 채움).
+    function enterSenderMode(pw) {
+      $('sendPw').value = pw; // 송신 로직이 이 필드를 읽는다.
+      $('sendPwRow').classList.add('hidden');
+      $('sendWarn').classList.add('hidden');
+      $('loginSec').classList.add('hidden');
+      $('senderSec').classList.remove('hidden');
+      $('sendSec').classList.remove('hidden');
+      senderRefresh();
+      pollTimer = setInterval(senderRefresh, 10000);
+      loadMics();
+    }
+
+    // ── 초기 비밀번호(0000) 변경 ────────────────────────
+    $('pwChangeBtn').onclick = async () => {
+      const p1 = $('newPw').value.trim();
+      const p2 = $('newPw2').value.trim();
+      if (p1.length < 4) { $('pwChangeMsg').textContent = '비밀번호는 4자 이상이어야 합니다.'; return; }
+      if (p1 !== p2) { $('pwChangeMsg').textContent = '두 입력이 일치하지 않습니다.'; return; }
+      $('pwChangeMsg').textContent = '변경 중…';
+      try {
+        await api('/admin/passwords/admin', {
+          method: 'PUT',
+          body: JSON.stringify({ new_password: p1 }),
+        }, adminPw);
+        // 변경 성공 — 새 비밀번호로 관리자 모드 진입(세대 유지, 방송 중단 없음).
+        enterAdminMode(p1);
+      } catch (e) {
+        $('pwChangeMsg').textContent = '변경 실패: ' + e.message;
+      }
+    };
+
+    function pubState(ch) {
+      if (ch.on_air) return '<span class="pill red">송신 중</span>';
+      if (ch.lease_held && ch.publisher_joined_at) return '<span class="pill green">접속됨</span>';
+      if (ch.lease_held) return '<span class="pill gray">발급됨(미접속)</span>';
+      return '<span class="pill gray">없음</span>';
+    }
+
+    // ── 송신 바로미터(실시간 오디오 레벨) ────────────────
+    // 관리자 모니터 토큰(hidden participant)으로 룸에 접속해 active-speaker 신호로
+    // 채널별 송신 레벨을 표시한다. 레벨 신호는 subscriber 데이터채널로만 오므로
+    // 트랙을 구독하되(autoSubscribe) 재생(attach)은 하지 않는다 — 소리 안 남.
+    let monitorRoom = null;
+    let monitorRetryTimer = null;
+    const levels = {}; // channel_id -> 0.0~1.0
+
+    function levelWidth(v) {
+      // 말소리 레벨(0.1~0.4)이 낮게 보이지 않도록 제곱근 스케일(앱 미터와 동일 규약).
+      return Math.min(100, Math.round(Math.sqrt(Math.max(0, v)) * 100));
+    }
+
+    function paintLevels() {
+      for (let i = 0; i <= 15; i++) {
+        const el = document.getElementById('lvl-' + i);
+        if (el) el.style.width = levelWidth(levels[i] || 0) + '%';
+      }
+    }
+
+    function recordingFor(kind, channelId) {
+      return recordingState.active.find(r => r.kind === kind && r.channel_id === channelId);
+    }
+
+    function recordingButton(kind, channelId) {
+      const active = recordingFor(kind, channelId);
+      if (active) {
+        return `<button class="danger small" onclick="toggleRecording('${kind}', ${channelId}, '${active.recording_id}')">녹음 종료</button>`;
+      }
+      return `<button class="small" onclick="toggleRecording('${kind}', ${channelId}, '')">녹음 시작</button>`;
+    }
+
+    function onSpeakers(speakers) {
+      for (const k of Object.keys(levels)) levels[k] = 0;
+      for (const sp of speakers) {
+        const m = /^speaker-ch-(\d{2})-/.exec(sp.identity || '');
+        if (m) levels[parseInt(m[1], 10)] = sp.audioLevel || 0;
+      }
+      paintLevels();
+    }
+
+    async function startMonitor() {
+      if (monitorRetryTimer) { clearTimeout(monitorRetryTimer); monitorRetryTimer = null; }
+      try {
+        const grant = await api('/admin/monitor-tokens', { method: 'POST' }, adminPw);
+        const room = new LK.Room();
+        room.on(LK.RoomEvent.ActiveSpeakersChanged, onSpeakers);
+        room.on(LK.RoomEvent.Disconnected, () => {
+          onSpeakers([]);
+          scheduleMonitorRetry(3000); // 세대 회전·서버 재시작 → 새 토큰으로 재접속.
+        });
+        await room.connect(defaultWsUrl(), grant.token, { autoSubscribe: true });
+        monitorRoom = room;
+        log('송신 레벨 모니터 연결됨');
+      } catch (e) {
+        // 초기 비밀번호(0000) 상태면 모니터 없이 동작한다(재시도 없음).
+        if (e.code === 'must_change_password') { log('레벨 모니터: ' + e.message); return; }
+        log('레벨 모니터 연결 실패(재시도 예정): ' + e.message);
+        scheduleMonitorRetry(10000);
+      }
+    }
+
+    function scheduleMonitorRetry(delayMs) {
+      if (monitorRetryTimer) return;
+      monitorRetryTimer = setTimeout(() => { monitorRetryTimer = null; startMonitor(); }, delayMs);
+    }
+
+    async function refresh() {
+      try {
+        const [st, intercom, recordings] = await Promise.all([
+          api('/admin/status', {}, adminPw),
+          api('/admin/intercom/status', {}, adminPw),
+          api('/admin/recordings', {}, adminPw),
+        ]);
+        recordingState = recordings;
+        $('summary').textContent = `총 청취자 ${st.total_listeners} · G${st.generation}`;
+        const open = st.channels.filter(c => c.state === 'open');
+        const rows = open.map(c => `
+          <tr>
+            <td>${c.channel_id}${c.channel_id === 0 ? ' <span class="pill gray">Floor</span>' : ''}</td>
+            <td>${escapeHtml(c.label)} <span class="muted-txt">(${escapeHtml(c.language)})</span></td>
+            <td>${pubState(c)}<span class="chmeter"><span class="chmeter-fill" id="lvl-${c.channel_id}" style="width:${levelWidth(levels[c.channel_id] || 0)}%"></span></span></td>
+            <td>${c.listeners}</td>
+            <td>${recordingButton('relay', c.channel_id)}</td>
+            <td><button class="danger small" onclick="delCh(${c.channel_id})">삭제</button></td>
+          </tr>`).join('');
+        $('chRows').innerHTML = rows || '<tr><td colspan="6" class="muted-txt">개설된 채널이 없습니다.</td></tr>';
+        renderIntercom(intercom);
+        renderRecordings(recordings.active, recordings.recordings);
+        syncIntercomMonitors(intercom.channels);
+        updateSendChannelOptions(open);
+      } catch (e) {
+        log('현황 조회 실패: ' + e.message);
+      }
+    }
+
+    // ── 무전기 채널 모니터링 ───────────────────────────
+    const intercomMonitorRooms = new Map(); // channel_id -> LiveKit Room
+    const intercomLevels = {};
+    let intercomWanted = new Set();
+
+    function renderIntercom(status) {
+      $('intercomSummary').textContent = `총 참가자 ${status.total_participants} · G${status.generation}`;
+      const rows = status.channels.map(c => {
+        const names = c.participants.map(p => escapeHtml(p.name || p.identity)).join(', ');
+        const availability = c.available ? `${c.participant_count}명` : '상태 확인 실패';
+        return `<tr>
+          <td>${c.channel_id}</td>
+          <td>${escapeHtml(c.name)}</td>
+          <td>${availability}${names ? `<div class="muted-txt">${names}</div>` : ''}</td>
+          <td><span class="chmeter"><span class="chmeter-fill" id="iclvl-${c.channel_id}" style="width:${levelWidth(intercomLevels[c.channel_id] || 0)}%"></span></span></td>
+          <td>${recordingButton('intercom', c.channel_id)}</td>
+        </tr>`;
+      }).join('');
+      $('intercomRows').innerHTML = rows || '<tr><td colspan="5" class="muted-txt">개설된 무전기 채널이 없습니다.</td></tr>';
+    }
+
+    function paintIntercomLevel(channelId, level) {
+      intercomLevels[channelId] = level;
+      const el = document.getElementById('iclvl-' + channelId);
+      if (el) el.style.width = levelWidth(level) + '%';
+    }
+
+    async function connectIntercomMonitor(channelId) {
+      if (!intercomWanted.has(channelId) || intercomMonitorRooms.has(channelId)) return;
+      // 연결 시도 중 중복 생성을 막는 자리표시자.
+      intercomMonitorRooms.set(channelId, null);
+      try {
+        const grant = await api(`/admin/intercom/channels/${channelId}/monitor-tokens`, { method: 'POST' }, adminPw);
+        const room = new LK.Room();
+        room.on(LK.RoomEvent.ActiveSpeakersChanged, speakers => {
+          const level = speakers
+            .filter(s => (s.identity || '').startsWith('intercom-'))
+            .reduce((max, s) => Math.max(max, s.audioLevel || 0), 0);
+          paintIntercomLevel(channelId, level);
+        });
+        room.on(LK.RoomEvent.Disconnected, () => {
+          paintIntercomLevel(channelId, 0);
+          intercomMonitorRooms.delete(channelId);
+          if (intercomWanted.has(channelId)) {
+            setTimeout(() => connectIntercomMonitor(channelId), 3000);
+          }
+        });
+        await room.connect(defaultWsUrl(), grant.token, { autoSubscribe: true });
+        intercomMonitorRooms.set(channelId, room);
+      } catch (e) {
+        intercomMonitorRooms.delete(channelId);
+        log(`무전기 채널 ${channelId} 모니터 연결 실패: ${e.message}`);
+      }
+    }
+
+    function syncIntercomMonitors(channels) {
+      const wanted = new Set(channels.map(c => c.channel_id));
+      intercomWanted = wanted;
+      for (const [channelId, room] of intercomMonitorRooms.entries()) {
+        if (!wanted.has(channelId)) {
+          if (room) room.disconnect();
+          intercomMonitorRooms.delete(channelId);
+          paintIntercomLevel(channelId, 0);
+        }
+      }
+      for (const channel of channels) connectIntercomMonitor(channel.channel_id);
+    }
+
+    // ── 서버 MP3 녹음 ──────────────────────────────────
+    window.toggleRecording = async (kind, channelId, recordingId) => {
+      try {
+        if (recordingId) {
+          await api(`/admin/recordings/${recordingId}/stop`, { method: 'POST' }, adminPw);
+          log(`${kind === 'relay' ? '방송' : '무전기'} 채널 ${channelId} 녹음 종료됨`);
+        } else {
+          await api('/admin/recordings', {
+            method: 'POST',
+            body: JSON.stringify({ kind, channel_id: channelId }),
+          }, adminPw);
+          log(`${kind === 'relay' ? '방송' : '무전기'} 채널 ${channelId} 서버 녹음 시작됨`);
+        }
+        await refresh();
+      } catch (e) {
+        log('녹음 작업 실패: ' + e.message);
+      }
+    };
+
+    function renderRecordings(active, recordings) {
+      const all = [...active, ...recordings];
+      const rows = all.map(r => `
+        <tr>
+          <td>${r.kind === 'relay' ? '방송' : '무전기'}</td>
+          <td>${r.channel_id} · ${escapeHtml(r.label)}</td>
+          <td>${new Date(r.started_at).toLocaleString()}</td>
+          <td>${r.active ? '<span class="pill red">녹음 중</span>' : Math.round(r.duration_seconds || 0) + '초'}</td>
+          <td>${r.size_bytes == null ? '-' : (r.size_bytes / 1024 / 1024).toFixed(1) + 'MB'}</td>
+          <td>${r.active
+            ? `<button class="danger small" onclick="toggleRecording('${r.kind}', ${r.channel_id}, '${r.recording_id}')">녹음 종료</button>`
+            : `<button class="small" onclick="downloadRecording('${r.recording_id}')">MP3 다운로드</button>`}</td>
+        </tr>`).join('');
+      $('recordingRows').innerHTML = rows || '<tr><td colspan="6" class="muted-txt">저장된 녹음이 없습니다.</td></tr>';
+    }
+
+    window.downloadRecording = async (recordingId) => {
+      try {
+        const res = await fetch(`${API}/admin/recordings/${recordingId}/download`, {
+          headers: { Authorization: 'Bearer ' + adminPw },
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.message || ('HTTP ' + res.status));
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `ev211-${recordingId}.mp3`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        log('녹음 다운로드 실패: ' + e.message);
+      }
+    };
+
+    // 송신자 모드 현황 — 무인증 /status 로 읽기 전용 표시(삭제·바로미터 없음).
+    async function senderRefresh() {
+      try {
+        const st = await api('/status');
+        $('senderSummary').textContent = `총 청취자 ${st.total_listeners} · G${st.generation}`;
+        const open = st.channels.filter(c => c.state === 'open');
+        const rows = open.map(c => `
+          <tr>
+            <td>${c.channel_id}${c.channel_id === 0 ? ' <span class="pill gray">Floor</span>' : ''}</td>
+            <td>${escapeHtml(c.label)} <span class="muted-txt">(${escapeHtml(c.language)})</span></td>
+            <td>${c.on_air ? '<span class="pill red">송신 중</span>' : '<span class="pill gray">대기</span>'}</td>
+            <td>${c.listeners}</td>
+          </tr>`).join('');
+        $('senderRows').innerHTML = rows || '<tr><td colspan="4" class="muted-txt">개설된 채널이 없습니다. 아래에서 채널 번호·언어를 정해 송신을 시작하면 자동 개설됩니다.</td></tr>';
+        updateSendChannelOptions(open);
+      } catch (e) {
+        log('현황 조회 실패: ' + e.message);
+      }
+    }
+
+    // 송신 채널 셀렉트 갱신(현재 선택 유지) — 관리자·송신자 모드 공용.
+    function updateSendChannelOptions(open) {
+      const sel = $('sendCh');
+      const prev = sel.value;
+      sel.innerHTML = '';
+      for (let i = 0; i <= 15; i++) {
+        const cur = open.find(c => c.channel_id === i);
+        const opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = i + (i === 0 ? ' (Floor)' : '') + (cur ? ` — ${cur.label}${cur.on_air ? ' · 송신 중' : ''}` : ' — 빈 슬롯(개설됨)');
+        if (!cur) opt.textContent = i + (i === 0 ? ' (Floor)' : '') + ' — 미개설(자동 개설)';
+        sel.appendChild(opt);
+      }
+      if (prev) sel.value = prev;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    window.delCh = async (id) => {
+      if (!confirm(`채널 ${id} 을(를) 삭제할까요? 해당 채널 송신자의 연결이 끊깁니다.`)) return;
+      try {
+        await api(`/channels/${id}`, { method: 'DELETE' }, adminPw);
+        log(`채널 ${id} 삭제됨`);
+        refresh();
+      } catch (e) { log('삭제 실패: ' + e.message); }
+    };
+
+    // ── 웹 송신 ─────────────────────────────────────────
+    let room = null, rafId = null, audioCtx = null;
+
+    async function loadMics() {
+      try {
+        const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+        tmp.getTracks().forEach(t => t.stop());
+      } catch (e) { log('마이크 권한 필요: ' + e.message); }
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const micSel = $('mic');
+      micSel.innerHTML = '';
+      devices.filter(d => d.kind === 'audioinput').forEach(d => {
+        const opt = document.createElement('option');
+        opt.value = d.deviceId; opt.textContent = d.label || ('마이크 ' + d.deviceId.slice(0, 6));
+        micSel.appendChild(opt);
+      });
+    }
+
+    $('startBtn').onclick = async () => {
+      const sendPw = $('sendPw').value.trim();
+      const channelId = parseInt($('sendCh').value, 10);
+      if (!sendPw) { log('송신자 비밀번호를 입력하세요'); return; }
+      $('startBtn').disabled = true;
+      try {
+        // 채널이 없으면 개설(이미 있으면 409 무시하고 발급 진행).
+        try {
+          await api('/channels', {
+            method: 'POST',
+            body: JSON.stringify({
+              channel_id: channelId,
+              language: $('sendLang').value.trim() || 'ko',
+              label: $('sendLabel').value.trim() || 'Korean (한국어)',
+            }),
+          }, sendPw);
+          log(`채널 ${channelId} 개설됨`);
+        } catch (e) { /* 이미 개설된 채널이면 발급으로 진행 */ }
+
+        const grant = await api('/publish-tokens', {
+          method: 'POST',
+          body: JSON.stringify({ channel_id: channelId }),
+        }, sendPw);
+
+        room = new LK.Room({ adaptiveStream: false, dynacast: false });
+        await room.connect(defaultWsUrl(), grant.token);
+        const track = await LK.createLocalAudioTrack({ deviceId: $('mic').value || undefined });
+        await room.localParticipant.publishTrack(track, { name: grant.track_name, source: LK.Track.Source.Microphone });
+        log(`송신 시작: 채널 ${channelId} (${grant.track_name})`);
+
+        // 레벨미터 (WebAudio)
+        audioCtx = new AudioContext();
+        const src = audioCtx.createMediaStreamSource(new MediaStream([track.mediaStreamTrack]));
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 512;
+        src.connect(analyser);
+        const buf = new Uint8Array(analyser.frequencyBinCount);
+        (function draw() {
+          analyser.getByteTimeDomainData(buf);
+          let peak = 0;
+          for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+          $('meterFill').style.width = Math.min(100, (peak / 128) * 200) + '%';
+          rafId = requestAnimationFrame(draw);
+        })();
+        $('stopBtn').disabled = false;
+      } catch (e) {
+        log('송신 시작 실패: ' + e.message);
+        $('startBtn').disabled = false;
+      }
+    };
+
+    $('stopBtn').onclick = async () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      if (audioCtx) { await audioCtx.close(); audioCtx = null; }
+      $('meterFill').style.width = '0%';
+      if (room) { await room.disconnect(); room = null; }
+      log('송신 정지됨');
+      $('startBtn').disabled = false;
+      $('stopBtn').disabled = true;
+      refresh();
+    };
+  </script>
+</body>
+</html>

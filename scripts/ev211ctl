@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# EV211 Field Server의 시작·진단·백업·복구·업데이트를 한 명령으로 관리한다
+set -euo pipefail
+
+APP_DIR="${EV211_APP_DIR:-/opt/ev211-field-server}"
+ENV_FILE="${EV211_ENV_FILE:-/etc/ev211-field/ev211.env}"
+BACKUP_DIR="${EV211_BACKUP_DIR:-/var/backups/ev211-field}"
+
+compose() {
+  docker compose \
+    --project-directory "$APP_DIR" \
+    --env-file "$ENV_FILE" \
+    -f "$APP_DIR/docker-compose.yml" \
+    -f "$APP_DIR/docker-compose.host.yml" "$@"
+}
+
+require_root() {
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo "이 명령은 root 권한이 필요합니다. sudo ev211ctl $* 로 실행하세요." >&2
+    exit 1
+  fi
+}
+
+require_install() {
+  [ -f "$APP_DIR/docker-compose.yml" ] || {
+    echo "설치 디렉터리를 찾을 수 없습니다: $APP_DIR" >&2
+    exit 1
+  }
+  [ -f "$ENV_FILE" ] || {
+    echo "설정 파일을 찾을 수 없습니다: $ENV_FILE" >&2
+    exit 1
+  }
+}
+
+start_server() {
+  compose up -d --build
+}
+
+doctor() {
+  compose config >/dev/null
+  compose ps
+  curl -fsS --max-time 8 http://localhost:7880/ >/dev/null
+  curl -fsS --max-time 8 http://localhost:8880/api/healthz
+  curl -kfsS --max-time 8 https://localhost:8443/api/healthz >/dev/null
+  echo
+  echo "진단 통과"
+}
+
+archive_volume() {
+  local volume="$1" output="$2" work="$3"
+  docker run --rm \
+    -v "${volume}:/source:ro" \
+    -v "${work}:/backup" \
+    caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648 \
+    sh -c "cd /source && tar -czf /backup/${output} ."
+}
+
+do_backup() {
+  local destination="${1:-$BACKUP_DIR}"
+  local stamp work archive
+  stamp="$(date -u +%Y%m%d-%H%M%S)"
+  install -d -m 700 "$destination"
+  work="$(mktemp -d)"
+  archive="$destination/ev211-field-$stamp.tar.gz"
+
+  compose stop
+  cleanup_backup() {
+    compose start >/dev/null 2>&1 || true
+    rm -rf "$work"
+  }
+  trap cleanup_backup EXIT INT TERM
+  install -m 600 "$ENV_FILE" "$work/ev211.env"
+  archive_volume ev211_field_api_data api-data.tar.gz "$work"
+  archive_volume ev211_field_caddy_data caddy-data.tar.gz "$work"
+  archive_volume ev211_field_caddy_config caddy-config.tar.gz "$work"
+  tar -C "$work" -czf "$archive" \
+    ev211.env api-data.tar.gz caddy-data.tar.gz caddy-config.tar.gz
+  chmod 600 "$archive"
+  compose start >/dev/null
+  trap - EXIT INT TERM
+  rm -rf "$work"
+  echo "$archive"
+}
+
+restore_volume() {
+  local volume="$1" input="$2" work="$3"
+  docker run --rm \
+    -v "${volume}:/target" \
+    -v "${work}:/backup:ro" \
+    caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648 \
+    sh -c "find /target -mindepth 1 -maxdepth 1 -exec rm -rf {} + && tar -xzf /backup/${input} -C /target"
+}
+
+restore_backup() {
+  local archive="${1:-}" confirmation="${2:-}"
+  [ -n "$archive" ] && [ "$confirmation" = "--yes" ] || {
+    echo "사용법: sudo ev211ctl restore <백업.tar.gz> --yes" >&2
+    exit 2
+  }
+  archive="$(realpath "$archive")"
+  [ -f "$archive" ] || { echo "백업 파일을 찾을 수 없습니다." >&2; exit 1; }
+  if tar -tzf "$archive" | awk '$0 ~ /^\// || $0 ~ /(^|\/)\.\.($|\/)/ { bad=1 } END { exit !bad }'; then
+    echo "안전하지 않은 경로가 포함된 백업입니다." >&2
+    exit 1
+  fi
+
+  local work restore_stopped
+  work="$(mktemp -d)"
+  restore_stopped=0
+  cleanup_restore() {
+    if [ "$restore_stopped" -eq 1 ]; then
+      compose start >/dev/null 2>&1 || true
+    fi
+    rm -rf "$work"
+  }
+  trap cleanup_restore EXIT INT TERM
+  tar -xzf "$archive" -C "$work"
+  for required in ev211.env api-data.tar.gz caddy-data.tar.gz caddy-config.tar.gz; do
+    [ -f "$work/$required" ] || { echo "백업에 $required 파일이 없습니다." >&2; exit 1; }
+  done
+
+  compose stop
+  restore_stopped=1
+  install -m 600 "$work/ev211.env" "$ENV_FILE"
+  restore_volume ev211_field_api_data api-data.tar.gz "$work"
+  restore_volume ev211_field_caddy_data caddy-data.tar.gz "$work"
+  restore_volume ev211_field_caddy_config caddy-config.tar.gz "$work"
+  start_server
+  restore_stopped=0
+  trap - EXIT INT TERM
+  rm -rf "$work"
+  doctor
+}
+
+update_server() {
+  [ -d "$APP_DIR/.git" ] || {
+    echo "Git 설치본이 아니어서 자동 업데이트할 수 없습니다." >&2
+    exit 1
+  }
+  if [ -n "$(git -C "$APP_DIR" status --porcelain)" ]; then
+    echo "저장소에 로컬 변경이 있어 업데이트를 중단합니다." >&2
+    exit 1
+  fi
+  local before
+  before="$(git -C "$APP_DIR" rev-parse HEAD)"
+  echo "업데이트 전 백업: $(do_backup)"
+  git -C "$APP_DIR" pull --ff-only
+  if ! start_server || ! doctor; then
+    echo "업데이트 검증 실패. 이전 커밋으로 복구합니다." >&2
+    git -C "$APP_DIR" reset --hard "$before"
+    start_server
+    doctor
+    exit 1
+  fi
+}
+
+show_credentials() {
+  local node send admin
+  node="$(sed -n 's/^FIELD_NODE_IP=//p' "$ENV_FILE")"
+  send="$(sed -n 's/^FIELD_SEND_PASSWORD=//p' "$ENV_FILE")"
+  admin="$(sed -n 's/^FIELD_ADMIN_PASSWORD=//p' "$ENV_FILE")"
+  echo "서버 IP: $node"
+  echo "송신 비밀번호: $send"
+  echo "관리자 비밀번호: $admin"
+}
+
+usage() {
+  echo "사용법: sudo ev211ctl {start|stop|restart|status|doctor|logs|credentials|backup|restore|update}"
+}
+
+main() {
+  local command="${1:-help}"
+  shift || true
+  case "$command" in
+    help|-h|--help) usage; exit 0 ;;
+  esac
+  require_root "$command"
+  require_install
+  case "$command" in
+    start) start_server ;;
+    stop) compose down ;;
+    restart) start_server ;;
+    status) compose ps ;;
+    doctor) doctor ;;
+    logs) compose logs -f --tail=200 "$@" ;;
+    credentials) show_credentials ;;
+    backup) do_backup "${1:-$BACKUP_DIR}" ;;
+    restore) restore_backup "${1:-}" "${2:-}" ;;
+    update) update_server ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+main "$@"

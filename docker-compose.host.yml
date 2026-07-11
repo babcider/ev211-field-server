@@ -1,0 +1,46 @@
+# EV211 Linux 현장 배포용 오버레이 — LiveKit 를 host 네트워크로 실행(UDP 프록시 우회)
+# LiveKit 공식 권장: 프로덕션은 network_mode: host 로 포트 매핑 없이 미디어 UDP 를 직접 처리.
+# 사용(Linux 호스트에서만):
+#   docker compose -f docker-compose.yml -f docker-compose.host.yml up -d
+# 주의:
+#   - macOS/Windows Docker Desktop 은 host 네트워크가 제한적이라 이 오버레이는 Linux 전용.
+#   - host 네트워크에서는 ports 매핑이 무시된다. 방화벽에서 7880/7881/50000-60000(udp) 직접 개방.
+#   - FIELD_NODE_IP 를 서버 LAN IP 로 설정해야 ICE 후보가 올바르게 광고된다.
+services:
+  livekit:
+    network_mode: host
+    # host 네트워크에서는 published ports 가 무의미하다.
+    # ⚠ `ports: []` 는 base 의 ports 를 제거하지 못한다(빈 리스트는 병합 시 무시됨).
+    #    반드시 `!reset []` 로 base ports 를 완전히 덮어써야 host 네트워크와 충돌하지 않는다.
+    #    (docker compose config 로 병합 결과에 ports 가 남지 않음을 검증할 것)
+    ports: !reset []
+    # host 네트워크에선 ephemeral 충돌 걱정이 없으므로 UDP 범위를 넓게 고정한다(50000-60000).
+    # base 의 LIVEKIT_RTC_PORT_RANGE_* 를 오버레이에서 덮어써 .env 값(macOS 42000-47000)에 좌우되지 않게 한다.
+    # 방화벽에서 UDP 50000-60000 을 직접 개방해야 한다.
+    environment:
+      LIVEKIT_RTC_PORT_RANGE_START: "50000"
+      LIVEKIT_RTC_PORT_RANGE_END: "60000"
+      # host 네트워크에선 도커 브리지 DNS(field-api)를 못 쓴다. 웹훅은 Caddy 의 호스트
+      # 루프백 published 포트(127.0.0.1:8880)의 /api 프록시를 경유해 field-api 로 보낸다
+      # — field-api 를 직접 publish 하면 호스트 로컬 프로세스가 XFF/XFP 헤더를 위조해
+      # https 강제·잠금·율제한을 우회할 수 있으므로 열지 않는다(codex 20차 [중요]).
+      # Caddy 가 /api 프리픽스를 스트립하고 XFF 를 127.0.0.1 로 고정한다.
+      LIVEKIT_WEBHOOK_URL: "http://localhost:8880/api/livekit/webhook"
+
+  # field-api·caddy 는 브리지 네트워크에 남는다(https 강제·프록시 구조 유지).
+  # host 네트워크의 livekit 과는 host-gateway 별칭으로 통신한다.
+  field-api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # RoomService/HTTP API — host 네트워크의 livekit(호스트 :7880)으로 접속.
+      LIVEKIT_HOST: "http://host.docker.internal:7880"
+      # 서버 녹음 participant의 WebRTC signaling 경로.
+      LIVEKIT_RTC_URL: "ws://host.docker.internal:7880"
+
+  caddy:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # /rtc wss 프록시 업스트림 — host 네트워크의 livekit 으로 변경.
+      LIVEKIT_UPSTREAM: "host.docker.internal:7880"

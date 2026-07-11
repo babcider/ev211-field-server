@@ -1,0 +1,143 @@
+<!-- EV211 송신 스파이크 페이지 — 토큰 입력 + 마이크 장치 선택 + 레벨미터 + 채널 트랙 publish -->
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EV211 송신 테스트</title>
+  <!-- CDN 금지: 로컬 번들 UMD 사용 -->
+  <script src="./vendor/livekit-client.umd.js"></script>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; color: #111; }
+    label { display: block; margin: 0.75rem 0 0.25rem; font-weight: 600; font-size: 0.9rem; }
+    input, select { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; }
+    button { margin-top: 1rem; padding: 0.6rem 1.2rem; border: 0; border-radius: 8px; background: #111; color: #fff; cursor: pointer; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    #meter { height: 16px; background: #eee; border-radius: 8px; overflow: hidden; margin-top: 0.5rem; }
+    #meterFill { height: 100%; width: 0%; background: #16a34a; transition: width 0.08s; }
+    #log { margin-top: 1rem; padding: 0.75rem; background: #f6f6f6; border-radius: 8px; font-size: 0.85rem; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>송신 테스트 (publish)</h1>
+
+  <label>LiveKit WS URL</label>
+  <input id="wsUrl" />
+
+  <label>Publish 토큰 (scripts/token-publish.sh 로 발급)</label>
+  <input id="token" placeholder="eyJ..." />
+
+  <label>채널 (트랙 이름)</label>
+  <select id="channel"></select>
+
+  <label>마이크 장치</label>
+  <select id="mic"></select>
+
+  <div id="meter"><div id="meterFill"></div></div>
+
+  <button id="connectBtn">연결 + 송신 시작</button>
+  <button id="disconnectBtn" disabled>중지</button>
+
+  <div id="log">대기 중…</div>
+
+  <script>
+    // 채널 셀렉트 채우기 (ch-00(Floor) ~ ch-15). ch-00 은 Floor(원본/공용) 채널.
+    const chSel = document.getElementById('channel');
+    for (let i = 0; i <= 15; i++) {
+      const name = 'ch-' + String(i).padStart(2, '0');
+      const opt = document.createElement('option');
+      opt.value = name; opt.textContent = i === 0 ? name + ' (Floor)' : name;
+      chSel.appendChild(opt);
+    }
+
+    // 서버 URL 기본값을 접속 방식에서 유도한다(mixed content·주소 오류 방지).
+    // ⚠ LiveKit SDK 는 base URL 에 스스로 `/rtc` 를 붙인다. 기본값에 `/rtc` 를 넣으면
+    //    실제 요청이 `/rtc/rtc/...` 가 되어 프록시가 404 를 낸다. 따라서 base URL 만 넘긴다.
+    //    Caddy 의 `reverse_proxy /rtc*` 는 SDK 가 붙인 `/rtc` 경로와 일치하므로 그대로 동작한다.
+    // - https 페이지(다른 노트북, :8443) → wss://<호스트>:8443 (Caddy 프록시)
+    // - http://localhost (서버 노트북) → LiveKit 직결 ws://localhost:7880
+    //   (8880 은 호스트 루프백 바인딩이라 서버 자신만 도달 가능. 외부 단말은 https:8443 만 사용)
+    function defaultWsUrl() {
+      const h = location.hostname;
+      if (location.protocol === 'https:') return `wss://${h}:8443`;
+      if (h === 'localhost' || h === '127.0.0.1') return 'ws://localhost:7880';
+      // 외부 http 접근은 지원하지 않는다(8880 루프백 전용). https:8443 로 접속해야 한다.
+      return `wss://${h}:8443`;
+    }
+    document.getElementById('wsUrl').value = defaultWsUrl();
+
+    const LK = window.LivekitClient;
+    const logEl = document.getElementById('log');
+    const meterFill = document.getElementById('meterFill');
+    const micSel = document.getElementById('mic');
+    let room = null, rafId = null, audioCtx = null;
+
+    function log(msg) { logEl.textContent = new Date().toLocaleTimeString() + '  ' + msg + '\n' + logEl.textContent; }
+
+    // 장치 목록 채우기 (권한 필요 → 최초 getUserMedia 후 라벨 노출)
+    async function loadMics() {
+      try {
+        const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+        tmp.getTracks().forEach(t => t.stop());
+      } catch (e) { log('마이크 권한 필요: ' + e.message); }
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      micSel.innerHTML = '';
+      devices.filter(d => d.kind === 'audioinput').forEach(d => {
+        const opt = document.createElement('option');
+        opt.value = d.deviceId; opt.textContent = d.label || ('마이크 ' + d.deviceId.slice(0, 6));
+        micSel.appendChild(opt);
+      });
+      log('마이크 ' + micSel.options.length + '개 발견');
+    }
+    loadMics();
+
+    document.getElementById('connectBtn').onclick = async () => {
+      const url = document.getElementById('wsUrl').value.trim();
+      const token = document.getElementById('token').value.trim();
+      const channel = chSel.value;
+      const deviceId = micSel.value;
+      if (!token) { log('토큰을 입력하세요'); return; }
+
+      try {
+        room = new LK.Room({ adaptiveStream: false, dynacast: false });
+        await room.connect(url, token);
+        log('룸 연결됨: ' + room.name);
+
+        // 선택 장치로 오디오 트랙 생성 후 트랙 이름 = 채널명으로 publish
+        const track = await LK.createLocalAudioTrack({ deviceId: deviceId || undefined });
+        await room.localParticipant.publishTrack(track, { name: channel, source: LK.Track.Source.Microphone });
+        log('송신 시작: 채널=' + channel);
+
+        // 레벨미터 (WebAudio)
+        audioCtx = new AudioContext();
+        const src = audioCtx.createMediaStreamSource(new MediaStream([track.mediaStreamTrack]));
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 512;
+        src.connect(analyser);
+        const buf = new Uint8Array(analyser.frequencyBinCount);
+        (function draw() {
+          analyser.getByteTimeDomainData(buf);
+          let peak = 0;
+          for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+          meterFill.style.width = Math.min(100, (peak / 128) * 200) + '%';
+          rafId = requestAnimationFrame(draw);
+        })();
+
+        document.getElementById('connectBtn').disabled = true;
+        document.getElementById('disconnectBtn').disabled = false;
+      } catch (e) {
+        log('오류: ' + e.message);
+      }
+    };
+
+    document.getElementById('disconnectBtn').onclick = async () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      if (audioCtx) await audioCtx.close();
+      meterFill.style.width = '0%';
+      if (room) { await room.disconnect(); log('중지됨'); }
+      document.getElementById('connectBtn').disabled = false;
+      document.getElementById('disconnectBtn').disabled = true;
+    };
+  </script>
+</body>
+</html>
