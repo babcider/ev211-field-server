@@ -48,6 +48,22 @@ class IntercomChannelRow:
         return self.password_hash is not None
 
 
+@dataclass
+class SignalEventRow:
+    event_id: int
+    occurred_at: float
+    direction: str
+    event_type: str
+    scope: str
+    channel_id: int | None
+    generation: int | None
+    room: str | None
+    track_name: str | None
+    subject_hash: str | None
+    client_ip: str | None
+    source_event_id: str | None
+
+
 class Database:
     """단일 SQLite 연결을 WAL 모드로 감싸는 원장. 프로세스 내 락으로 원자성을 보장한다.
 
@@ -144,9 +160,107 @@ class Database:
                 password_hash TEXT,
                 created_at REAL NOT NULL
             );
+
+            -- 사용자 송수신 세션 감사 로그. 비밀번호·JWT·음성은 저장하지 않고
+            -- participant 식별자는 애플리케이션에서 해시한 값만 저장한다.
+            CREATE TABLE IF NOT EXISTS signal_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                occurred_at REAL NOT NULL,
+                direction TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                channel_id INTEGER,
+                generation INTEGER,
+                room TEXT,
+                track_name TEXT,
+                subject_hash TEXT,
+                client_ip TEXT,
+                source_event_id TEXT UNIQUE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_signal_events_occurred_at
+            ON signal_events(occurred_at);
             """
         )
         c.commit()
+
+    # ---- 송수신 신호 이벤트 ----
+    def record_signal_event(
+        self,
+        *,
+        direction: str,
+        event_type: str,
+        scope: str,
+        channel_id: int | None = None,
+        generation: int | None = None,
+        room: str | None = None,
+        track_name: str | None = None,
+        subject_hash: str | None = None,
+        client_ip: str | None = None,
+        source_event_id: str | None = None,
+        occurred_at: float | None = None,
+    ) -> bool:
+        """신호 이벤트를 저장한다. 같은 LiveKit event id 재전송은 한 번만 저장한다."""
+        try:
+            with self._tx():
+                self._conn.execute(
+                    "INSERT INTO signal_events "
+                    "(occurred_at, direction, event_type, scope, channel_id, generation, "
+                    "room, track_name, subject_hash, client_ip, source_event_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        _now() if occurred_at is None else occurred_at,
+                        direction,
+                        event_type,
+                        scope,
+                        channel_id,
+                        generation,
+                        room,
+                        track_name,
+                        subject_hash,
+                        client_ip,
+                        source_event_id,
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            if source_event_id is not None:
+                return False
+            raise
+        return True
+
+    def list_signal_events(self, limit: int = 200) -> list[SignalEventRow]:
+        rows = self._query(
+            "SELECT * FROM signal_events ORDER BY occurred_at DESC, id DESC LIMIT ?",
+            (max(1, min(limit, 10_000)),),
+        )
+        return [
+            SignalEventRow(
+                event_id=int(r["id"]),
+                occurred_at=float(r["occurred_at"]),
+                direction=str(r["direction"]),
+                event_type=str(r["event_type"]),
+                scope=str(r["scope"]),
+                channel_id=None if r["channel_id"] is None else int(r["channel_id"]),
+                generation=None if r["generation"] is None else int(r["generation"]),
+                room=None if r["room"] is None else str(r["room"]),
+                track_name=None if r["track_name"] is None else str(r["track_name"]),
+                subject_hash=None if r["subject_hash"] is None else str(r["subject_hash"]),
+                client_ip=None if r["client_ip"] is None else str(r["client_ip"]),
+                source_event_id=(
+                    None if r["source_event_id"] is None else str(r["source_event_id"])
+                ),
+            )
+            for r in rows
+        ]
+
+    def purge_signal_events(self, retention_seconds: int, now: float | None = None) -> int:
+        """보관 기간을 초과한 신호 이벤트를 삭제하고 삭제 행 수를 반환한다."""
+        cutoff = (_now() if now is None else now) - retention_seconds
+        with self._tx():
+            cursor = self._conn.execute(
+                "DELETE FROM signal_events WHERE occurred_at < ?", (cutoff,)
+            )
+        return max(0, cursor.rowcount)
 
     # ---- 런타임 설정(비밀번호 오버라이드 등) ----
     def get_setting(self, key: str) -> str | None:

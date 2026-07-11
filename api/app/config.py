@@ -17,6 +17,8 @@ LISTENER_HEARTBEAT_TTL_SECONDS = 30  # heartbeat 보관 TTL 30초
 ISSUED_LISTENER_TTL_SECONDS = 3600  # 발급 원장·토큰 근사 카운트 보관 TTL 1시간(만료분 정리)
 LEASE_JOIN_GRACE_SECONDS = 120  # 미접속(joined 안 됨) lease 자동 해제 유예(발급 후 접속 실패 방어)
 ROOM_EMPTY_TIMEOUT_SECONDS = 86400  # 룸 empty_timeout — 빈 룸이 삭제되지 않도록 충분히 크게(24h)
+SIGNAL_LOG_RETENTION_SECONDS = 30 * 24 * 60 * 60  # 송수신 세션 이벤트 보관 기간 30일
+SIGNAL_LOG_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60  # 만료 이벤트 정리 주기 1일
 
 # 기본값(변경 강제 대상). .env.example 의 자리표시자를 기동 시 거부한다.
 _DEFAULT_PASSWORDS = {"change-me", "changeme", "", "password", "default"}

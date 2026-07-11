@@ -10,6 +10,7 @@ EV211 앱이 같은 Wi-Fi 안에서 음성을 송신·수신하고 무전기 채
 - Android·iOS 앱에서 채널 수신, 송신, PTT 무전기를 지원합니다.
 - 송신·수신 바로미터로 오디오 신호를 확인할 수 있습니다.
 - 관리자 웹에서 방송·무전기 채널을 모니터링하고 채널별 MP3 녹음과 관리자·송신자 비밀번호 변경을 관리합니다.
+- 방송·무전기 송수신 접속 이벤트를 30일간 기록하고 자동 정리합니다.
 - 송신자 비밀번호와 관리자 비밀번호를 분리합니다.
 - 로컬 HTTPS, 서버 인증서 TOFU 확인, 단기 LiveKit 토큰을 사용합니다.
 - Docker Compose와 systemd로 자동 시작하며 백업·진단 명령을 제공합니다.
@@ -69,12 +70,15 @@ App Store와 Google Play 배포 링크는 심사 완료 후 이 문서에 추가
 sudo ev211ctl status
 sudo ev211ctl doctor
 sudo ev211ctl logs
+sudo ev211ctl signal-logs 200
 sudo ev211ctl restart
 sudo ev211ctl backup
 sudo ev211ctl update
 ```
 
 설정과 자동 생성 비밀정보는 `/etc/ev211-field/ev211.env`에 저장되며 권한은 root 전용인 `600`입니다. 데이터와 Caddy 인증서는 Docker named volume에 저장됩니다. 업데이트 전에는 `ev211ctl update`가 자동으로 백업합니다.
+
+`signal-logs`는 최근 송수신 토큰 발급과 실제 참가·퇴장·송신 트랙 이벤트를 UTC 시각으로 보여줍니다. 자세한 보존 범위와 개인정보 안내는 [신호 로그 안내](docs/SIGNAL_LOGS.md)를 확인하세요.
 
 ## 네트워크 포트
 

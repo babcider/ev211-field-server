@@ -178,8 +178,56 @@ show_credentials() {
   echo "관리자 비밀번호: $admin"
 }
 
+show_signal_logs() {
+  local limit="${1:-200}"
+  if ! [[ "$limit" =~ ^[0-9]+$ ]] || [ "$limit" -lt 1 ] || [ "$limit" -gt 10000 ]; then
+    echo "조회 개수는 1~10000 사이 정수여야 합니다." >&2
+    exit 2
+  fi
+  compose exec -T field-api python - "$limit" <<'PY'
+# SQLite에 보관된 최근 송수신 신호 이벤트를 UTC 표 형식으로 출력한다
+from __future__ import annotations
+
+import datetime
+import os
+import sqlite3
+import sys
+
+limit = int(sys.argv[1])
+db_path = os.environ.get("FIELD_DB_PATH", "/data/field.db")
+connection = sqlite3.connect(db_path)
+connection.row_factory = sqlite3.Row
+rows = connection.execute(
+    "SELECT occurred_at, direction, event_type, scope, channel_id, generation, "
+    "room, track_name, subject_hash, client_ip "
+    "FROM signal_events ORDER BY occurred_at DESC, id DESC LIMIT ?",
+    (limit,),
+).fetchall()
+connection.close()
+
+print("occurred_at_utc\tdirection\tevent\tscope\tchannel\tgeneration\troom\ttrack\tsubject_hash\tclient_ip")
+for row in rows:
+    occurred_at = datetime.datetime.fromtimestamp(
+        row["occurred_at"], datetime.timezone.utc
+    ).isoformat(timespec="seconds")
+    values = [
+        occurred_at,
+        row["direction"],
+        row["event_type"],
+        row["scope"],
+        row["channel_id"],
+        row["generation"],
+        row["room"],
+        row["track_name"],
+        row["subject_hash"],
+        row["client_ip"],
+    ]
+    print("\t".join("-" if value is None else str(value) for value in values))
+PY
+}
+
 usage() {
-  echo "사용법: sudo ev211ctl {start|stop|restart|status|doctor|logs|credentials|backup|restore|update}"
+  echo "사용법: sudo ev211ctl {start|stop|restart|status|doctor|logs|signal-logs|credentials|backup|restore|update}"
 }
 
 main() {
@@ -197,6 +245,7 @@ main() {
     status) compose ps ;;
     doctor) doctor ;;
     logs) compose logs -f --tail=200 "$@" ;;
+    signal-logs) show_signal_logs "${1:-200}" ;;
     credentials) show_credentials ;;
     backup) do_backup "${1:-$BACKUP_DIR}" ;;
     restore) restore_backup "${1:-}" "${2:-}" ;;

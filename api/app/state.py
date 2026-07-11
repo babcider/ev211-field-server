@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 
 from .config import (
     ADMIN_FAIL_LIMIT,
@@ -24,6 +25,8 @@ from .monitor import OnAirTracker
 from .rate_limit import Blocklist, FailureLock, RateLimiter
 from .recording import RecordingManager
 from .tokens import intercom_channel_room_name, intercom_room_name, room_name
+
+log = logging.getLogger(__name__)
 
 
 def password_hash(send_pw: str, admin_pw: str) -> str:
@@ -87,6 +90,47 @@ class AppState:
             lock = asyncio.Lock()
             self._intercom_pw_key_locks[key] = lock
         return lock
+
+    def record_signal_event(
+        self,
+        *,
+        direction: str,
+        event_type: str,
+        scope: str,
+        channel_id: int | None = None,
+        generation: int | None = None,
+        room: str | None = None,
+        track_name: str | None = None,
+        subject: str | None = None,
+        client_ip: str | None = None,
+        source_event_id: str | None = None,
+    ) -> bool:
+        """민감한 원문 식별자를 해시한 뒤 송수신 세션 이벤트를 영속한다."""
+        subject_hash = None
+        if subject:
+            subject_hash = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:16]
+        inserted = self.db.record_signal_event(
+            direction=direction,
+            event_type=event_type,
+            scope=scope,
+            channel_id=channel_id,
+            generation=self.generation if generation is None else generation,
+            room=room[:128] if room else None,
+            track_name=track_name[:128] if track_name else None,
+            subject_hash=subject_hash,
+            client_ip=client_ip[:64] if client_ip else None,
+            source_event_id=source_event_id[:128] if source_event_id else None,
+        )
+        if inserted:
+            log.info(
+                "signal_event direction=%s event=%s scope=%s channel=%s generation=%s",
+                direction,
+                event_type,
+                scope,
+                channel_id,
+                self.generation if generation is None else generation,
+            )
+        return inserted
 
     def channel_lock(self, channel_id: int) -> asyncio.Lock:
         """채널별 직렬화 락을 반환한다(없으면 생성). 이벤트루프 단일 스레드에서만 호출된다.

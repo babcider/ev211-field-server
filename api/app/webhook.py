@@ -1,10 +1,22 @@
 # LiveKit 웹훅 서명 검증·강제 로직 — participant_joined 즉시 검증, track 1개 제한, stale left 방어
 from __future__ import annotations
 
+import re
+
 from livekit.api import TokenVerifier, WebhookReceiver
 
-from .identity import is_intercom_identity, is_monitor_identity, parse_speaker_identity
+from .identity import (
+    is_intercom_identity,
+    is_listener_identity,
+    is_monitor_identity,
+    parse_speaker_identity,
+)
 from .state import AppState
+
+_RELAY_ROOM_RE = re.compile(r"^field-g(?P<generation>\d+)$")
+_INTERCOM_ROOM_RE = re.compile(
+    r"^intercom-g(?P<generation>\d+)(?:-c(?P<channel>\d+))?$"
+)
 
 
 class WebhookProcessor:
@@ -42,6 +54,7 @@ class WebhookProcessor:
         # room 정보가 없는 이벤트(빈 이름)는 종전대로 identity 기반 처리로 흘린다.
         room = getattr(event, "room", None)
         event_room = getattr(room, "name", "") if room is not None else ""
+        self._record_signal_event(event, event_room)
         if event_room and event_room != state.room:
             if event_id:
                 state.db.mark_webhook_processed(event_id)
@@ -62,6 +75,60 @@ class WebhookProcessor:
         # ③ 처리 성공 — 이제서야 event id 를 멱등 커밋한다.
         if event_id:
             state.db.mark_webhook_processed(event_id)
+
+    def _record_signal_event(self, event, event_room: str) -> None:
+        """사용자 송수신과 관련된 검증 완료 LiveKit 이벤트만 감사 로그에 남긴다."""
+        kind = event.event
+        if kind not in {
+            "participant_joined",
+            "participant_left",
+            "track_published",
+            "track_unpublished",
+        }:
+            return
+        participant = getattr(event, "participant", None)
+        identity = getattr(participant, "identity", "") if participant is not None else ""
+        if not identity or is_monitor_identity(identity):
+            return
+
+        scope: str
+        direction: str
+        channel_id: int | None = None
+        parsed = parse_speaker_identity(identity)
+        relay_room = _RELAY_ROOM_RE.match(event_room)
+        intercom_room = _INTERCOM_ROOM_RE.match(event_room)
+        if relay_room is not None:
+            scope = "relay"
+            if parsed is not None:
+                direction = "send"
+                channel_id = parsed.channel_id
+            elif is_listener_identity(identity) and kind in {"participant_joined", "participant_left"}:
+                direction = "receive"
+            else:
+                return
+            generation = int(relay_room.group("generation"))
+        elif intercom_room is not None and is_intercom_identity(identity):
+            scope = "intercom"
+            direction = "send" if kind in {"track_published", "track_unpublished"} else "both"
+            if intercom_room.group("channel") is not None:
+                channel_id = int(intercom_room.group("channel"))
+            generation = int(intercom_room.group("generation"))
+        else:
+            return
+
+        track = getattr(event, "track", None)
+        track_name = getattr(track, "name", None) if track is not None else None
+        self._state.record_signal_event(
+            direction=direction,
+            event_type=kind,
+            scope=scope,
+            channel_id=channel_id,
+            generation=generation,
+            room=event_room,
+            track_name=track_name,
+            subject=identity,
+            source_event_id=event.id or None,
+        )
 
     async def _remove(self, identity: str) -> None:
         """participant 제거를 시도한다(#1).
