@@ -18,6 +18,7 @@
     body { font-family: Inter, -apple-system, system-ui, sans-serif; max-width: 860px; margin: 1.5rem auto; padding: 0 1rem; background: var(--canvas); color: var(--text); }
     h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.02em; }
     h1 .brand { color: var(--lavender); }
+    h1 .version { margin-left: 0.4rem; font-weight: 500; vertical-align: middle; }
     h2 { font-size: 1.05rem; font-weight: 500; margin-top: 1.8rem; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
     label { display: block; margin: 0.6rem 0 0.2rem; font-weight: 500; font-size: 0.85rem; color: var(--muted); }
     input, select { padding: 0.45rem 0.6rem; background: var(--card); color: var(--text); border: 1px solid var(--iron); border-radius: 12px; box-sizing: border-box; font-size: 0.9rem; }
@@ -43,6 +44,8 @@
     .chmeter { display: inline-block; vertical-align: middle; width: 90px; height: 10px; background: var(--elevated); border-radius: 6px; overflow: hidden; margin-left: 0.5rem; }
     .chmeter-fill { display: block; height: 100%; width: 0%; background: var(--green); transition: width 0.15s; }
     #log { margin-top: 1rem; padding: 0.7rem; background: var(--card); border: 1px solid var(--border); color: var(--muted); border-radius: 12px; font-size: 0.8rem; white-space: pre-wrap; max-height: 180px; overflow-y: auto; }
+    #sendStatus { min-height: 1.2rem; margin-top: 0.55rem; color: var(--muted); font-size: 0.85rem; font-weight: 600; }
+    #sendStatus.error { color: var(--ember); }
     .row { display: flex; gap: 0.6rem; align-items: flex-end; flex-wrap: wrap; }
     .row > div { flex: 1; min-width: 140px; }
     .summary { margin-top: 0.5rem; font-size: 0.85rem; color: var(--dim); }
@@ -52,7 +55,7 @@
   </style>
 </head>
 <body>
-  <h1><span class="brand">EV211</span> 현장 콘솔</h1>
+  <h1><span class="brand">EV211</span> 현장 콘솔 <span class="pill gray version">UI 2026.07.11.2</span></h1>
 
   <!-- ── 로그인(비밀번호 종류로 자동 분기: 관리자 → 대시보드, 송신자 → 송신 페이지) ── -->
   <section id="loginSec">
@@ -155,9 +158,10 @@
         <label>마이크 장치</label>
         <select id="mic" style="width:100%"></select>
       </div>
-      <div style="flex:0"><button id="startBtn">송신 시작</button></div>
-      <div style="flex:0"><button id="stopBtn" class="danger" disabled>송신 정지</button></div>
+      <div style="flex:0"><button id="startBtn" type="button">송신 시작</button></div>
+      <div style="flex:0"><button id="stopBtn" type="button" class="danger" disabled>송신 정지</button></div>
     </div>
+    <div id="sendStatus" role="status" aria-live="polite">송신 대기</div>
     <div id="meter"><div id="meterFill"></div></div>
     <div id="log">대기 중…</div>
   </section>
@@ -167,6 +171,10 @@
     const $ = (id) => document.getElementById(id);
     const logEl = $('log');
     function log(msg) { logEl.textContent = new Date().toLocaleTimeString() + '  ' + msg + '\n' + logEl.textContent; }
+    function setSendStatus(msg, isError = false) {
+      $('sendStatus').textContent = msg;
+      $('sendStatus').classList.toggle('error', isError);
+    }
 
     // 페이지가 Caddy(:8443 https / :8880 localhost)에서 서빙되므로 same-origin /api 를 쓴다.
     const API = '/api';
@@ -603,9 +611,15 @@
     $('startBtn').onclick = async () => {
       const sendPw = $('sendPw').value.trim();
       const channelId = parseInt($('sendCh').value, 10);
-      if (!sendPw) { log('송신자 비밀번호를 입력하세요'); return; }
+      if (!sendPw) {
+        setSendStatus('송신자 비밀번호를 입력하세요.', true);
+        log('송신자 비밀번호를 입력하세요');
+        $('sendPw').focus();
+        return;
+      }
       $('startBtn').disabled = true;
       $('startBtn').textContent = '준비 중…';
+      setSendStatus(`채널 ${channelId} 확인 중…`);
       let localTrack = null;
       try {
         // 채널이 없으면 개설(이미 있으면 409 무시하고 발급 진행).
@@ -626,6 +640,7 @@
         }
 
         $('startBtn').textContent = '권한 발급 중…';
+        setSendStatus('송신 권한 발급 중…');
         log('송신 준비: 접속 권한 발급 중…');
         const grant = await api('/publish-tokens', {
           method: 'POST',
@@ -633,6 +648,7 @@
         }, sendPw);
 
         $('startBtn').textContent = '서버 연결 중…';
+        setSendStatus('음성 서버 연결 중…');
         log('송신 준비: 음성 서버 연결 중…');
         room = new LK.Room({ adaptiveStream: false, dynacast: false });
         await withTimeout(
@@ -643,6 +659,7 @@
 
         $('startBtn').textContent = '마이크 연결 중…';
         const selectedMic = $('mic').selectedOptions[0]?.textContent || '기본 마이크';
+        setSendStatus(`마이크 연결 중… (${selectedMic})`);
         log(`송신 준비: 마이크 연결 중… (${selectedMic})`);
         localTrack = await withTimeout(
           LK.createLocalAudioTrack({ deviceId: $('mic').value || undefined }),
@@ -671,11 +688,17 @@
           rafId = requestAnimationFrame(draw);
         })();
         $('startBtn').textContent = '송신 중';
+        setSendStatus(`채널 ${channelId} 송신 중`);
         $('stopBtn').disabled = false;
         if (sessionMode === 'admin') refresh();
         if (sessionMode === 'sender') senderRefresh();
       } catch (e) {
-        log('송신 시작 실패: ' + e.message);
+        const message = e.code === 'unauthorized'
+          ? '송신자 비밀번호가 올바르지 않습니다.'
+          : e.message;
+        setSendStatus('송신 시작 실패: ' + message, true);
+        log('송신 시작 실패: ' + message);
+        if (e.code === 'unauthorized') $('sendPw').focus();
         if (localTrack) {
           try { localTrack.stop(); } catch (_) { /* 이미 종료된 마이크 */ }
         }
@@ -696,6 +719,7 @@
       $('meterFill').style.width = '0%';
       if (room) { await room.disconnect(); room = null; }
       if (wasPublishing) log('송신 정지됨');
+      setSendStatus('송신 대기');
       $('startBtn').textContent = '송신 시작';
       $('startBtn').disabled = false;
       $('stopBtn').disabled = true;
@@ -743,6 +767,7 @@
       $('sendSec').classList.add('hidden');
       $('loginSec').classList.remove('hidden');
       $('loginMsg').textContent = '로그아웃했습니다. 다른 비밀번호로 다시 접속할 수 있습니다.';
+      setSendStatus('송신 대기');
       logEl.textContent = '대기 중…';
       $('adminPw').focus();
     };

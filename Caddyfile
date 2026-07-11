@@ -26,9 +26,20 @@ http://:80 {
 	}
 }
 
+# 관리자 단일 페이지는 운영 중 자주 갱신되므로 브라우저 재검증 없이 저장하지 않는다.
+(admin_no_cache) {
+	@admin_page path /admin.html
+	header @admin_page {
+		Cache-Control "no-store, max-age=0, must-revalidate"
+		Pragma "no-cache"
+		Expires "0"
+	}
+}
+
 # 경로 1: 서버 노트북 자신 — localhost http. getUserMedia 는 localhost 에서 보안 컨텍스트로 허용됨.
 http://localhost:8880 {
 	import security_headers
+	import admin_no_cache
 	# LiveKit signaling ws 프록시 (http 경로에서는 ws). 웹 페이지 기본값이 여기로 붙는다.
 	handle /rtc* {
 		# 기본은 도커 브리지 DNS(livekit:7880). Linux host-mode 오버레이는
@@ -59,6 +70,7 @@ http://localhost:8880 {
 localhost:8443, 127.0.0.1:8443, {$FIELD_NODE_IP:127.0.0.1}:8443 {
 	tls internal
 	import security_headers
+	import admin_no_cache
 	# 루트(/) 진입은 관리자 대시보드로 즉시 이동 — 스파이크 메뉴(index.html)를 노출하지 않는다.
 	# redir 의 단일 인자가 "/"로 시작하면 경로 매처로 오인되므로 `*` 매처를 명시한다.
 	handle / {
