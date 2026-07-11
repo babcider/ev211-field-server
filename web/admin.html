@@ -46,6 +46,7 @@
     .row { display: flex; gap: 0.6rem; align-items: flex-end; flex-wrap: wrap; }
     .row > div { flex: 1; min-width: 140px; }
     .summary { margin-top: 0.5rem; font-size: 0.85rem; color: var(--dim); }
+    .sessionbar { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; margin-top: 0.8rem; padding: 0.6rem 0.7rem; background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
     .hidden { display: none; }
     .warn { background: rgba(255, 86, 50, 0.12); border: 1px solid rgba(255, 86, 50, 0.4); border-radius: 12px; padding: 0.6rem; font-size: 0.82rem; margin-top: 0.6rem; }
   </style>
@@ -61,6 +62,13 @@
       <div style="flex:0"><button id="loginBtn">접속</button></div>
     </div>
     <div id="loginMsg" class="muted-txt" style="margin-top:0.5rem"></div>
+  </section>
+
+  <section id="sessionSec" class="hidden">
+    <div class="sessionbar">
+      <span id="sessionLabel" class="pill green"></span>
+      <button id="logoutBtn" class="danger small">로그아웃</button>
+    </div>
   </section>
 
   <!-- ── 초기 관리자 비밀번호(0000) 변경 강제 ─────────────── -->
@@ -163,6 +171,7 @@
     // 페이지가 Caddy(:8443 https / :8880 localhost)에서 서빙되므로 same-origin /api 를 쓴다.
     const API = '/api';
     let adminPw = '';
+    let sessionMode = null;
     let pollTimer = null;
     let recordingState = { active: [], recordings: [] };
 
@@ -200,6 +209,7 @@
         if (pw === '0000') {
           // 초기 관리자 비밀번호 — 서버가 특권 작업을 거부하므로 변경을 먼저 강제한다.
           adminPw = pw;
+          showSession('admin');
           $('loginSec').classList.add('hidden');
           $('pwChangeSec').classList.remove('hidden');
         } else {
@@ -222,11 +232,22 @@
     };
     $('adminPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
 
+    function showSession(mode) {
+      sessionMode = mode;
+      $('sessionLabel').textContent = mode === 'admin' ? '관리자 모드' : '송신자 모드';
+      $('sessionSec').classList.remove('hidden');
+    }
+
     // 관리자 모드: 상세 현황(삭제·바로미터) + 브라우저 송신(송신 비번 별도 입력).
     function enterAdminMode(pw) {
       adminPw = pw;
+      showSession('admin');
+      $('sendPw').value = '';
+      $('sendPwRow').classList.remove('hidden');
+      $('sendWarn').classList.remove('hidden');
       $('loginSec').classList.add('hidden');
       $('pwChangeSec').classList.add('hidden');
+      $('senderSec').classList.add('hidden');
       $('dashSec').classList.remove('hidden');
       $('sendSec').classList.remove('hidden');
       refresh();
@@ -237,6 +258,8 @@
 
     // 송신자 모드: 읽기 전용 현황 + 채널 개설·송신(비밀번호 자동 채움).
     function enterSenderMode(pw) {
+      adminPw = '';
+      showSession('sender');
       $('sendPw').value = pw; // 송신 로직이 이 필드를 읽는다.
       $('sendPwRow').classList.add('hidden');
       $('sendWarn').classList.add('hidden');
@@ -316,6 +339,7 @@
     }
 
     async function startMonitor() {
+      if (sessionMode !== 'admin') return;
       if (monitorRetryTimer) { clearTimeout(monitorRetryTimer); monitorRetryTimer = null; }
       try {
         const grant = await api('/admin/monitor-tokens', { method: 'POST' }, adminPw);
@@ -323,7 +347,7 @@
         room.on(LK.RoomEvent.ActiveSpeakersChanged, onSpeakers);
         room.on(LK.RoomEvent.Disconnected, () => {
           onSpeakers([]);
-          scheduleMonitorRetry(3000); // 세대 회전·서버 재시작 → 새 토큰으로 재접속.
+          if (sessionMode === 'admin') scheduleMonitorRetry(3000); // 세대 회전·서버 재시작 → 새 토큰으로 재접속.
         });
         await room.connect(defaultWsUrl(), grant.token, { autoSubscribe: true });
         monitorRoom = room;
@@ -337,6 +361,7 @@
     }
 
     function scheduleMonitorRetry(delayMs) {
+      if (sessionMode !== 'admin') return;
       if (monitorRetryTimer) return;
       monitorRetryTimer = setTimeout(() => { monitorRetryTimer = null; startMonitor(); }, delayMs);
     }
@@ -398,7 +423,7 @@
     }
 
     async function connectIntercomMonitor(channelId) {
-      if (!intercomWanted.has(channelId) || intercomMonitorRooms.has(channelId)) return;
+      if (sessionMode !== 'admin' || !intercomWanted.has(channelId) || intercomMonitorRooms.has(channelId)) return;
       // 연결 시도 중 중복 생성을 막는 자리표시자.
       intercomMonitorRooms.set(channelId, null);
       try {
@@ -612,15 +637,61 @@
       }
     };
 
-    $('stopBtn').onclick = async () => {
-      if (rafId) cancelAnimationFrame(rafId);
+    async function stopPublishing(refreshAfter = true) {
+      const wasPublishing = Boolean(rafId || audioCtx || room);
+      if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
       if (audioCtx) { await audioCtx.close(); audioCtx = null; }
       $('meterFill').style.width = '0%';
       if (room) { await room.disconnect(); room = null; }
-      log('송신 정지됨');
+      if (wasPublishing) log('송신 정지됨');
       $('startBtn').disabled = false;
       $('stopBtn').disabled = true;
-      refresh();
+      if (refreshAfter) {
+        if (sessionMode === 'admin') refresh();
+        if (sessionMode === 'sender') senderRefresh();
+      }
+    }
+
+    $('stopBtn').onclick = () => stopPublishing();
+
+    $('logoutBtn').onclick = async () => {
+      sessionMode = null;
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      if (monitorRetryTimer) { clearTimeout(monitorRetryTimer); monitorRetryTimer = null; }
+      intercomWanted = new Set();
+
+      await stopPublishing(false);
+
+      if (monitorRoom) {
+        const currentMonitor = monitorRoom;
+        monitorRoom = null;
+        try { await currentMonitor.disconnect(); } catch (_) { /* 이미 종료된 연결 */ }
+      }
+      const intercomRooms = [...intercomMonitorRooms.values()].filter(Boolean);
+      intercomMonitorRooms.clear();
+      for (const intercomRoom of intercomRooms) {
+        try { await intercomRoom.disconnect(); } catch (_) { /* 이미 종료된 연결 */ }
+      }
+
+      for (const key of Object.keys(levels)) delete levels[key];
+      for (const key of Object.keys(intercomLevels)) delete intercomLevels[key];
+      recordingState = { active: [], recordings: [] };
+      adminPw = '';
+      $('adminPw').value = '';
+      $('sendPw').value = '';
+      $('newPw').value = '';
+      $('newPw2').value = '';
+      $('sendPwRow').classList.remove('hidden');
+      $('sendWarn').classList.remove('hidden');
+      $('sessionSec').classList.add('hidden');
+      $('pwChangeSec').classList.add('hidden');
+      $('dashSec').classList.add('hidden');
+      $('senderSec').classList.add('hidden');
+      $('sendSec').classList.add('hidden');
+      $('loginSec').classList.remove('hidden');
+      $('loginMsg').textContent = '로그아웃했습니다. 다른 비밀번호로 다시 접속할 수 있습니다.';
+      logEl.textContent = '대기 중…';
+      $('adminPw').focus();
     };
   </script>
 </body>
