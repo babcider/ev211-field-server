@@ -57,7 +57,7 @@
   </style>
 </head>
 <body>
-  <h1><span class="brand">EV211</span> 현장 콘솔 <span class="pill gray version">UI 2026.07.11.4</span></h1>
+  <h1><span class="brand">EV211</span> 현장 콘솔 <span class="pill gray version">UI 2026.07.13.1</span></h1>
 
   <!-- ── 로그인(비밀번호 종류로 자동 분기: 관리자 → 대시보드, 송신자 → 송신 페이지) ── -->
   <section id="loginSec">
@@ -769,8 +769,15 @@
         const selectedMic = $('mic').selectedOptions[0]?.textContent || '기본 마이크';
         setSendStatus(`마이크 연결 중… (${selectedMic})`);
         log(`송신 준비: 마이크 연결 중… (${selectedMic})`);
+        // 가상 장치(Voicemeeter 등) 루프백 캡처 시 브라우저 전처리(AEC/NS/AGC)가
+        // 신호를 에코·노이즈로 오인해 무음이 되므로 전처리를 끈다.
         localTrack = await withTimeout(
-          LK.createLocalAudioTrack({ deviceId: $('mic').value || undefined }),
+          LK.createLocalAudioTrack({
+            deviceId: $('mic').value || undefined,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          }),
           10000,
           '마이크 연결 시간이 10초를 초과했습니다. 브라우저 마이크 권한과 입력 장치를 확인하세요.',
         );

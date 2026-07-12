@@ -104,7 +104,14 @@
         log('룸 연결됨: ' + room.name);
 
         // 선택 장치로 오디오 트랙 생성 후 트랙 이름 = 채널명으로 publish
-        const track = await LK.createLocalAudioTrack({ deviceId: deviceId || undefined });
+        // 가상 장치(Voicemeeter 등) 루프백 캡처 시 브라우저 전처리(AEC/NS/AGC)가
+        // 신호를 에코·노이즈로 오인해 무음이 되므로 전처리를 끈다.
+        const track = await LK.createLocalAudioTrack({
+          deviceId: deviceId || undefined,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        });
         await room.localParticipant.publishTrack(track, { name: channel, source: LK.Track.Source.Microphone });
         log('송신 시작: 채널=' + channel);
 
