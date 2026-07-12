@@ -1,0 +1,29 @@
+# 공개 브라우저 수신 화면의 필수 연결 요소를 확인하는 정적 회귀 테스트
+from __future__ import annotations
+
+from pathlib import Path
+
+
+ROOT = Path(__file__).parents[2]
+
+
+def test_public_listener_page_uses_open_subscribe_apis_and_hides_operator_login():
+    page = (ROOT / "web" / "index.html").read_text()
+
+    for text in (
+        "'/channels'",
+        "subscribe-tokens",
+        "'/listeners/heartbeat'",
+        "id=\"loginToggle\"",
+        "id=\"loginPanel\" class=\"card hidden\"",
+        "ev211.pendingLoginPassword",
+        "new LK.Room({ autoSubscribe: false",
+    ):
+        assert text in page
+
+
+def test_https_root_serves_public_listener_page_without_admin_redirect():
+    caddyfile = (ROOT / "Caddyfile").read_text()
+
+    assert "import web_no_cache" in caddyfile
+    assert "redir * /admin.html" not in caddyfile

@@ -1,26 +1,320 @@
-<!-- EV211 내부망 필드 서버 스파이크 진입 페이지 — 송신/수신 테스트 링크 -->
+<!-- 공개 수신자가 통역 채널을 선택해 청취하는 EV211 필드 서버 기본 화면 -->
 <!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>EV211 필드 서버 스파이크</title>
+  <title>EV211 통역 수신</title>
+  <script src="./vendor/livekit-client.umd.js"></script>
   <style>
-    /* Doppler 다크 콘솔 토큰 (docs/DESIGN_Doppler_ev211app.md) */
-    body { font-family: Inter, -apple-system, system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; background: #1c1624; color: #f1f0ec; }
-    a.card { display: block; padding: 1.25rem; margin: 1rem 0; background: #2d2734; border: 1px solid rgba(229, 231, 235, 0.14); border-radius: 20px; text-decoration: none; color: inherit; }
-    a.card:hover { border-color: #b997ff; }
-    h1 { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.02em; }
-    h1 .brand { color: #b997ff; }
-    small { color: #a5a2a5; }
-    code { color: #b997ff; }
+    :root { --canvas: #1c1624; --card: #2d2734; --elevated: #3a3340; --text: #f1f0ec; --muted: #d0c9c4; --dim: #a5a2a5; --iron: #55505b; --border: rgba(229, 231, 235, 0.14); --lavender: #b997ff; --green: #00f575; --ember: #ff5632; }
+    * { box-sizing: border-box; }
+    body { font-family: Inter, -apple-system, system-ui, sans-serif; max-width: 680px; min-height: 100vh; margin: 0 auto; padding: 1rem; background: var(--canvas); color: var(--text); }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 0.4rem 0 2.4rem; }
+    h1 { margin: 0; font-size: 1.35rem; letter-spacing: -0.02em; }
+    .brand { color: var(--lavender); }
+    .card { padding: 1.2rem; background: var(--card); border: 1px solid var(--border); border-radius: 18px; }
+    h2 { margin: 0 0 0.35rem; font-size: 1.05rem; }
+    p { margin: 0.4rem 0; color: var(--muted); line-height: 1.5; }
+    label { display: block; margin: 1.2rem 0 0.35rem; color: var(--muted); font-size: 0.88rem; font-weight: 600; }
+    select, input { width: 100%; padding: 0.7rem 0.8rem; color: var(--text); background: var(--elevated); border: 1px solid var(--iron); border-radius: 10px; font: inherit; }
+    button { padding: 0.65rem 1rem; border: 0; border-radius: 10px; background: var(--green); color: #000; cursor: pointer; font: inherit; font-weight: 700; }
+    button.secondary { background: var(--elevated); color: var(--text); border: 1px solid var(--iron); }
+    button.danger { background: var(--ember); }
+    button:disabled { cursor: not-allowed; opacity: 0.55; }
+    .actions { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 1rem; }
+    #listenStatus { min-height: 1.5rem; margin-top: 1rem; color: var(--muted); font-weight: 600; }
+    #listenStatus.error { color: var(--ember); }
+    audio { width: 100%; margin-top: 0.8rem; }
+    #channelList { margin: 1rem 0 0; padding: 0; list-style: none; }
+    #channelList li { display: flex; justify-content: space-between; gap: 1rem; padding: 0.55rem 0; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.9rem; }
+    .onair { color: var(--green); font-weight: 700; }
+    .waiting { color: var(--dim); }
+    .hidden { display: none; }
+    #loginPanel { position: absolute; right: 1rem; top: 3.8rem; width: min(320px, calc(100vw - 2rem)); z-index: 1; }
+    #loginPanel label { margin-top: 0; }
+    .login-note { margin-top: 0.8rem; color: var(--dim); font-size: 0.8rem; }
   </style>
 </head>
 <body>
-  <h1><span class="brand">EV211</span> 내부망 필드 서버 — Phase 0 스파이크</h1>
-  <p><small>룸 모델: 세션당 룸 <code>field</code> 1개 + 오디오 트랙 <code>ch-01</code>~<code>ch-15</code></small></p>
-  <a class="card" href="./admin.html"><strong>관리자 대시보드</strong><br /><small>채널 현황 모니터링(10초 갱신) + 실시간 송신 바로미터 + 채널 삭제 + 브라우저 송신</small></a>
-  <a class="card" href="./speak-test.html"><strong>송신 테스트</strong><br /><small>마이크 선택 + 레벨미터 + 채널 트랙 publish</small></a>
-  <a class="card" href="./listen-test.html"><strong>수신 테스트</strong><br /><small>채널(트랙) 선택 → 단일 트랙 구독, 전환 시 이전 트랙 해제</small></a>
+  <header>
+    <h1><span class="brand">EV211</span> 통역 수신</h1>
+    <button id="loginToggle" class="secondary" type="button" aria-expanded="false" aria-controls="loginPanel">로그인</button>
+    <section id="loginPanel" class="card hidden" aria-label="운영자 로그인">
+      <form id="loginForm">
+        <label for="operatorPassword">관리자 또는 송신자 비밀번호</label>
+        <input id="operatorPassword" type="password" autocomplete="current-password" required />
+        <div class="actions"><button type="submit">운영 화면 열기</button></div>
+      </form>
+      <p class="login-note">수신자는 비밀번호 없이 아래에서 통역 채널을 선택해 들을 수 있습니다.</p>
+    </section>
+  </header>
+
+  <main class="card">
+    <h2>통역 채널 선택</h2>
+    <p>원하는 언어 채널을 선택한 뒤 듣기를 누르세요. 송신이 시작되면 자동으로 재생합니다.</p>
+
+    <label for="channel">현재 개설된 채널</label>
+    <select id="channel" disabled><option>채널을 불러오는 중입니다.</option></select>
+    <div class="actions">
+      <button id="startButton" type="button" disabled>듣기 시작</button>
+      <button id="stopButton" type="button" class="danger" disabled>듣기 중지</button>
+      <button id="refreshButton" type="button" class="secondary">채널 새로고침</button>
+    </div>
+    <div id="listenStatus" role="status" aria-live="polite">채널을 불러오는 중입니다.</div>
+    <audio id="player" controls autoplay></audio>
+
+    <ul id="channelList" aria-label="개설된 통역 채널"></ul>
+  </main>
+
+  <script>
+    const LK = window.LivekitClient;
+    const API = '/api';
+    const channelSelect = document.getElementById('channel');
+    const startButton = document.getElementById('startButton');
+    const stopButton = document.getElementById('stopButton');
+    const refreshButton = document.getElementById('refreshButton');
+    const statusEl = document.getElementById('listenStatus');
+    const channelList = document.getElementById('channelList');
+    const player = document.getElementById('player');
+    let channels = [];
+    let room = null;
+    let grant = null;
+    let selectedChannelId = null;
+    let playingTrack = null;
+    let heartbeatTimer = null;
+    let renewalTimer = null;
+    let retryTimer = null;
+    let retryCount = 0;
+
+    function defaultWsUrl() {
+      const host = location.hostname;
+      if (location.protocol === 'https:') return `wss://${host}:8443`;
+      if (host === 'localhost' || host === '127.0.0.1') return 'ws://localhost:7880';
+      return `wss://${host}:8443`;
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(API + path, {
+        ...options,
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      });
+      if (response.status === 204) return null;
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = new Error(body.message || `HTTP ${response.status}`);
+        error.code = body.code;
+        throw error;
+      }
+      return body;
+    }
+
+    function setStatus(message, isError = false) {
+      statusEl.textContent = message;
+      statusEl.classList.toggle('error', isError);
+    }
+
+    function renderChannels() {
+      const previous = channelSelect.value;
+      channelSelect.replaceChildren();
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = channels.length ? '— 통역 채널을 선택하세요 —' : '현재 개설된 통역 채널이 없습니다.';
+      channelSelect.appendChild(placeholder);
+
+      channelList.replaceChildren();
+      for (const channel of channels) {
+        const option = document.createElement('option');
+        option.value = String(channel.channel_id);
+        option.textContent = `${channel.label} (${channel.language})${channel.on_air ? ' · 송신 중' : ''}`;
+        channelSelect.appendChild(option);
+
+        const item = document.createElement('li');
+        const name = document.createElement('span');
+        name.textContent = `${channel.label} (${channel.language})`;
+        const state = document.createElement('span');
+        state.className = channel.on_air ? 'onair' : 'waiting';
+        state.textContent = channel.on_air ? '송신 중' : '송신 대기';
+        item.append(name, state);
+        channelList.appendChild(item);
+      }
+      channelSelect.disabled = channels.length === 0 || room !== null;
+      if (channels.some((channel) => String(channel.channel_id) === previous)) channelSelect.value = previous;
+      startButton.disabled = !channelSelect.value || room !== null;
+    }
+
+    async function loadChannels() {
+      try {
+        const body = await api('/channels');
+        channels = body.channels.filter((channel) => channel.state === 'open');
+        renderChannels();
+        if (!room) setStatus(channels.length ? '통역 채널을 선택하세요.' : '현재 개설된 통역 채널이 없습니다.');
+      } catch (error) {
+        setStatus(`채널을 불러오지 못했습니다. ${error.message}`, true);
+      }
+    }
+
+    function clearTimers() {
+      clearInterval(heartbeatTimer);
+      clearTimeout(renewalTimer);
+      clearTimeout(retryTimer);
+      heartbeatTimer = null;
+      renewalTimer = null;
+      retryTimer = null;
+    }
+
+    function detachAudio() {
+      if (playingTrack) playingTrack.detach(player);
+      playingTrack = null;
+      player.pause();
+      player.srcObject = null;
+    }
+
+    async function closeRoom() {
+      const leavingRoom = room;
+      room = null;
+      detachAudio();
+      if (leavingRoom) {
+        try { await leavingRoom.disconnect(); } catch (_) { /* 이미 끊긴 연결 */ }
+      }
+    }
+
+    function expectedPublication(targetRoom) {
+      let expected = null;
+      targetRoom.remoteParticipants.forEach((participant) => {
+        participant.trackPublications.forEach((publication) => {
+          if (publication.kind === 'audio' && publication.trackName === grant.track_name) expected = publication;
+        });
+      });
+      return expected;
+    }
+
+    function subscribeExpectedTrack(targetRoom) {
+      const publication = expectedPublication(targetRoom);
+      if (publication) {
+        publication.setSubscribed(true);
+        setStatus('통역 오디오에 연결하는 중입니다.');
+      } else {
+        setStatus('선택한 채널의 송신을 기다리고 있습니다.');
+      }
+    }
+
+    function attachAudio(track) {
+      detachAudio();
+      playingTrack = track;
+      track.attach(player);
+      player.play().catch(() => {
+        setStatus('재생이 차단되었습니다. 아래 재생 버튼을 누르세요.');
+      });
+      setStatus('통역을 듣는 중입니다.');
+    }
+
+    async function sendHeartbeat() {
+      if (!grant || selectedChannelId === null) return;
+      try {
+        await api('/listeners/heartbeat', {
+          method: 'POST',
+          body: JSON.stringify({ channel_id: selectedChannelId, listener_id: grant.listener_id }),
+        });
+      } catch (_) { /* 청취를 중단하지 않고 다음 heartbeat에서 재시도 */ }
+    }
+
+    function bindRoom(targetRoom) {
+      targetRoom.on(LK.RoomEvent.TrackPublished, (publication) => {
+        if (room === targetRoom && publication.kind === 'audio' && publication.trackName === grant.track_name) {
+          publication.setSubscribed(true);
+          setStatus('통역 오디오에 연결하는 중입니다.');
+        }
+      });
+      targetRoom.on(LK.RoomEvent.TrackSubscribed, (track, publication) => {
+        const trackName = publication?.trackName || track.name;
+        if (room === targetRoom && track.kind === 'audio' && trackName === grant.track_name) attachAudio(track);
+      });
+      targetRoom.on(LK.RoomEvent.TrackUnpublished, (publication) => {
+        if (room === targetRoom && publication.trackName === grant.track_name) {
+          detachAudio();
+          setStatus('선택한 채널의 송신을 기다리고 있습니다.');
+        }
+      });
+      targetRoom.on(LK.RoomEvent.Disconnected, () => {
+        if (room !== targetRoom || selectedChannelId === null || retryCount >= 1) return;
+        retryCount += 1;
+        room = null;
+        detachAudio();
+        setStatus('연결이 끊겼습니다. 다시 연결하는 중입니다.');
+        retryTimer = setTimeout(() => connectChannel(selectedChannelId), 1000);
+      });
+    }
+
+    async function connectChannel(channelId) {
+      clearTimers();
+      await closeRoom();
+      selectedChannelId = channelId;
+      startButton.disabled = true;
+      stopButton.disabled = false;
+      refreshButton.disabled = true;
+      channelSelect.disabled = true;
+      try {
+        setStatus('청취 권한을 확인하는 중입니다.');
+        grant = await api(`/channels/${channelId}/subscribe-tokens`, { method: 'POST' });
+        const nextRoom = new LK.Room({ autoSubscribe: false, adaptiveStream: false, dynacast: false });
+        room = nextRoom;
+        bindRoom(nextRoom);
+        setStatus('통역 서버에 연결하는 중입니다.');
+        await nextRoom.connect(defaultWsUrl(), grant.token, { autoSubscribe: false });
+        if (room !== nextRoom) return;
+        retryCount = 0;
+        subscribeExpectedTrack(nextRoom);
+        sendHeartbeat();
+        heartbeatTimer = setInterval(sendHeartbeat, 15000);
+        renewalTimer = setTimeout(() => connectChannel(channelId), Math.max(60000, (grant.ttl_seconds - 60) * 1000));
+      } catch (error) {
+        await closeRoom();
+        grant = null;
+        selectedChannelId = null;
+        setStatus(`청취를 시작하지 못했습니다. ${error.message}`, true);
+      } finally {
+        refreshButton.disabled = false;
+        if (!room) {
+          stopButton.disabled = true;
+          channelSelect.disabled = channels.length === 0;
+          startButton.disabled = !channelSelect.value;
+        }
+      }
+    }
+
+    async function stopListening() {
+      clearTimers();
+      selectedChannelId = null;
+      grant = null;
+      retryCount = 0;
+      await closeRoom();
+      stopButton.disabled = true;
+      channelSelect.disabled = channels.length === 0;
+      startButton.disabled = !channelSelect.value;
+      setStatus('청취를 중지했습니다.');
+    }
+
+    document.getElementById('loginToggle').onclick = () => {
+      const panel = document.getElementById('loginPanel');
+      const isHidden = panel.classList.toggle('hidden');
+      document.getElementById('loginToggle').setAttribute('aria-expanded', String(!isHidden));
+      if (!isHidden) document.getElementById('operatorPassword').focus();
+    };
+    document.getElementById('loginForm').onsubmit = (event) => {
+      event.preventDefault();
+      const password = document.getElementById('operatorPassword').value.trim();
+      if (!password) return;
+      try { sessionStorage.setItem('ev211.pendingLoginPassword', password); } catch (_) { /* 관리자 화면에서 다시 입력 */ }
+      location.assign('./admin.html');
+    };
+    channelSelect.onchange = () => { startButton.disabled = !channelSelect.value || room !== null; };
+    startButton.onclick = () => connectChannel(Number(channelSelect.value));
+    stopButton.onclick = stopListening;
+    refreshButton.onclick = loadChannels;
+    window.addEventListener('beforeunload', () => { if (room) room.disconnect(); });
+    loadChannels();
+    setInterval(loadChannels, 15000);
+  </script>
 </body>
 </html>

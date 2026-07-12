@@ -289,6 +289,16 @@
       }
     };
     $('adminPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+    // 공개 수신 화면의 상단 로그인에서 전달된 값은 현재 탭의 sessionStorage 에만 잠시 둔다.
+    // 읽은 즉시 지워 일반 새로고침이나 다른 탭에 비밀번호가 남지 않게 한다.
+    try {
+      const pendingLoginPassword = sessionStorage.getItem('ev211.pendingLoginPassword');
+      sessionStorage.removeItem('ev211.pendingLoginPassword');
+      if (pendingLoginPassword) {
+        $('adminPw').value = pendingLoginPassword;
+        $('loginBtn').click();
+      }
+    } catch (_) { /* 저장소가 제한된 브라우저에서는 기존 로그인 입력을 사용한다. */ }
 
     function showSession(mode) {
       sessionMode = mode;
