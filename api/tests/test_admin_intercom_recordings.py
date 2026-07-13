@@ -205,3 +205,36 @@ def test_recording_manager_lists_only_safe_completed_mp3(tmp_path):
     assert [item["recording_id"] for item in listing["recordings"]] == [recording_id]
     assert manager.download_path(recording_id) == tmp_path / f"{recording_id}.mp3"
     assert manager.download_path("../../etc/passwd") is None
+
+
+# ---- 녹음 삭제 ----
+def test_recording_manager_delete_removes_files(tmp_path):
+    mgr = RecordingManager(str(tmp_path), "ws://localhost", "k", "s")
+    rid = str(uuid.uuid4())
+    (tmp_path / f"{rid}.mp3").write_bytes(b"mp3")
+    (tmp_path / f"{rid}.json").write_text("{}", encoding="utf-8")
+    assert mgr.delete(rid) is True
+    assert not (tmp_path / f"{rid}.mp3").exists()
+    assert not (tmp_path / f"{rid}.json").exists()
+    # 이미 삭제된 ID·잘못된 ID 는 False(404 대응).
+    assert mgr.delete(rid) is False
+    assert mgr.delete("not-a-uuid") is False
+
+
+def test_recording_delete_endpoint(client, admin_headers, state, tmp_path):
+    mgr = RecordingManager(str(tmp_path), "ws://localhost", "k", "s")
+    state.recordings = mgr
+    rid = str(uuid.uuid4())
+    (tmp_path / f"{rid}.mp3").write_bytes(b"mp3")
+    (tmp_path / f"{rid}.json").write_text("{}", encoding="utf-8")
+
+    # 무인증은 거부된다.
+    assert client.delete(f"/admin/recordings/{rid}").status_code in (401, 403)
+
+    r = client.delete(f"/admin/recordings/{rid}", headers=admin_headers)
+    assert r.status_code == 204
+    assert not (tmp_path / f"{rid}.mp3").exists()
+
+    # 없는 녹음은 404.
+    r = client.delete(f"/admin/recordings/{rid}", headers=admin_headers)
+    assert r.status_code == 404

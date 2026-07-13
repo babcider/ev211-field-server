@@ -1299,6 +1299,25 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
             filename=f"ev211-{recording_id}.mp3",
         )
 
+    @app.delete("/admin/recordings/{recording_id}", status_code=204)
+    async def delete_recording(
+        request: Request,
+        recording_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        """완결된 녹음 MP3와 메타데이터를 삭제한다(진행 중 녹음은 409)."""
+        st = _st(request)
+        denied = _admin_guard(request, authorization)
+        if denied is not None:
+            return denied
+        try:
+            removed = st.recordings.delete(recording_id)
+        except RecordingError as exc:
+            return _err("recording_error", str(exc), 409)
+        if not removed:
+            return _err("not_found", "녹음 파일을 찾을 수 없습니다.", 404)
+        return Response(status_code=204)
+
     # ---- webhook ----
     @app.post("/livekit/webhook")
     async def livekit_webhook(request: Request, authorization: str | None = Header(default=None)):

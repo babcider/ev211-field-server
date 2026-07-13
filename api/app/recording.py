@@ -352,6 +352,17 @@ class RecordingManager:
             return None
         return path
 
+    def delete(self, recording_id: str) -> bool:
+        """완결된 녹음의 MP3·메타데이터를 삭제한다. 진행 중 녹음은 거부."""
+        if recording_id in self._active:
+            raise RecordingError("진행 중인 녹음은 종료 후 삭제할 수 있습니다.")
+        path = self.download_path(recording_id)  # UUID·디렉터리 이탈 검증 재사용
+        if path is None:
+            return False
+        path.unlink(missing_ok=True)
+        (self._directory / f"{recording_id}.json").unlink(missing_ok=True)
+        return True
+
     async def close(self) -> None:
         for recording_id in list(self._active):
             try:
