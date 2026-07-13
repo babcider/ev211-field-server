@@ -395,7 +395,10 @@ def test_heartbeat_unissued_does_not_create_limiter_key(client, send_headers):
 
 # ---- #13 admin rate limit ----
 def test_admin_status_rate_limited(client, admin_headers):
-    codes = [client.get("/admin/status", headers=admin_headers).status_code for _ in range(35)]
+    # 한도(ADMIN_RL_PER_MINUTE=120)를 상수 기준으로 초과시켜 한도 변경에 테스트가 깨지지 않게 한다.
+    from app.config import ADMIN_RL_PER_MINUTE
+
+    codes = [client.get("/admin/status", headers=admin_headers).status_code for _ in range(ADMIN_RL_PER_MINUTE + 5)]
     assert 429 in codes
 
 
