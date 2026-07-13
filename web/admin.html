@@ -58,7 +58,7 @@
   </style>
 </head>
 <body>
-  <h1><span class="brand">EV211</span> 현장 콘솔 <span class="pill gray version">UI 2026.07.13.1</span><button id="languageToggle" class="small" type="button" style="float:right"></button></h1>
+  <h1><span class="brand">EV211</span> 현장 콘솔 <span class="pill gray version">UI 2026.07.13.2</span><button id="languageToggle" class="small" type="button" style="float:right"></button></h1>
 
   <!-- ── 로그인(비밀번호 종류로 자동 분기: 관리자 → 대시보드, 송신자 → 송신 페이지) ── -->
   <section id="loginSec">
@@ -731,6 +731,11 @@
     // ── 웹 송신 ─────────────────────────────────────────
     let room = null, rafId = null, audioCtx = null;
 
+    // 가상 오디오 장치(루프백) 라벨 판별 — Voicemeeter, VB-Audio Cable, BlackHole 등.
+    function isVirtualMicLabel(label) {
+      return /voicemeeter|vb-audio|vb audio|virtual|blackhole|soundflower|loopback|\bcable\b/i.test(label || '');
+    }
+
     async function loadMics() {
       try {
         const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -799,15 +804,23 @@
         const selectedMic = $('mic').selectedOptions[0]?.textContent || t('defaultMic');
         setSendStatus(t('connectingMicStatus', { microphone: selectedMic }));
         log(t('connectingMicLog', { microphone: selectedMic }));
-        // 가상 장치(Voicemeeter 등) 루프백 캡처 시 브라우저 전처리(AEC/NS/AGC)가
-        // 신호를 에코·노이즈로 오인해 무음이 되므로 전처리를 끈다.
+        // 가상 장치(Voicemeeter 등) 루프백 캡처는 브라우저 전처리(AEC/NS/AGC)가
+        // 신호를 에코·노이즈로 오인해 무음이 되므로 그 경우에만 전처리를 끈다.
+        // 실제 마이크는 전처리를 유지해야 원시 잡음·험이 그대로 송출되지 않는다.
+        const rawCapture = isVirtualMicLabel(selectedMic);
+        if (rawCapture) log('가상 오디오 장치 감지(' + selectedMic + ') → 원음 모드(브라우저 전처리 해제)');
         localTrack = await withTimeout(
-          LK.createLocalAudioTrack({
-            deviceId: $('mic').value || undefined,
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          }),
+          LK.createLocalAudioTrack(
+            rawCapture
+              ? {
+                  deviceId: $('mic').value || undefined,
+                  echoCancellation: false,
+                  noiseSuppression: false,
+                  autoGainControl: false,
+                  channelCount: 1,
+                }
+              : { deviceId: $('mic').value || undefined },
+          ),
           10000,
           t('micTimeout'),
         );

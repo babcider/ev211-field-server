@@ -104,14 +104,17 @@
         log('룸 연결됨: ' + room.name);
 
         // 선택 장치로 오디오 트랙 생성 후 트랙 이름 = 채널명으로 publish
-        // 가상 장치(Voicemeeter 등) 루프백 캡처 시 브라우저 전처리(AEC/NS/AGC)가
-        // 신호를 에코·노이즈로 오인해 무음이 되므로 전처리를 끈다.
-        const track = await LK.createLocalAudioTrack({
-          deviceId: deviceId || undefined,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        });
+        // 가상 장치(Voicemeeter 등) 루프백 캡처는 브라우저 전처리(AEC/NS/AGC)가
+        // 신호를 에코·노이즈로 오인해 무음이 되므로 그 경우에만 전처리를 끈다.
+        // 실제 마이크는 전처리를 유지해야 원시 잡음·험이 그대로 송출되지 않는다.
+        const micLabel = micSel.selectedOptions[0]?.textContent || '';
+        const rawCapture = /voicemeeter|vb-audio|vb audio|virtual|blackhole|soundflower|loopback|\bcable\b/i.test(micLabel);
+        if (rawCapture) log('가상 오디오 장치 감지(' + micLabel + ') → 원음 모드(브라우저 전처리 해제)');
+        const track = await LK.createLocalAudioTrack(
+          rawCapture
+            ? { deviceId: deviceId || undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 }
+            : { deviceId: deviceId || undefined },
+        );
         await room.localParticipant.publishTrack(track, { name: channel, source: LK.Track.Source.Microphone });
         log('송신 시작: 채널=' + channel);
 
