@@ -27,3 +27,10 @@ def test_https_root_serves_public_listener_page_without_admin_redirect():
 
     assert "import web_no_cache" in caddyfile
     assert "redir * /admin.html" not in caddyfile
+
+
+def test_operator_logout_returns_to_public_listener_page():
+    page = (ROOT / "web" / "admin.html").read_text()
+
+    assert "$('logoutBtn').onclick = async () =>" in page
+    assert "location.assign('/');" in page

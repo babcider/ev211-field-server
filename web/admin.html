@@ -904,7 +904,7 @@
       $('loginMsg').textContent = '로그아웃했습니다. 다른 비밀번호로 다시 접속할 수 있습니다.';
       setSendStatus('송신 대기');
       logEl.textContent = '대기 중…';
-      $('adminPw').focus();
+      location.assign('/');
     };
   </script>
 </body>
