@@ -7,6 +7,7 @@
   <title>EV211 현장 콘솔</title>
   <!-- CDN 금지: 로컬 번들 UMD 사용 -->
   <script src="./vendor/livekit-client.umd.js"></script>
+  <script src="./i18n.js"></script>
   <style>
     /* Doppler 다크 콘솔 토큰 (docs/DESIGN_Doppler_ev211app.md) — 어두운 현장용 */
     :root {
@@ -57,13 +58,13 @@
   </style>
 </head>
 <body>
-  <h1><span class="brand">EV211</span> 현장 콘솔 <span class="pill gray version">UI 2026.07.13.1</span></h1>
+  <h1><span class="brand">EV211</span> 현장 콘솔 <span class="pill gray version">UI 2026.07.13.1</span><button id="languageToggle" class="small" type="button" style="float:right"></button></h1>
 
   <!-- ── 로그인(비밀번호 종류로 자동 분기: 관리자 → 대시보드, 송신자 → 송신 페이지) ── -->
   <section id="loginSec">
     <label>비밀번호 (관리자 또는 송신자)</label>
     <div class="row">
-      <div><input id="adminPw" type="password" autocomplete="current-password" placeholder="관리자 비밀번호 → 대시보드 · 송신자 비밀번호 → 송신 페이지" /></div>
+      <div><input id="adminPw" type="password" autocomplete="current-password" data-i18n-placeholder="adminPasswordPlaceholder" placeholder="관리자 비밀번호 → 대시보드 · 송신자 비밀번호 → 송신 페이지" /></div>
       <div style="flex:0"><button id="loginBtn">접속</button></div>
     </div>
     <div id="loginMsg" class="muted-txt" style="margin-top:0.5rem"></div>
@@ -203,6 +204,21 @@
   </section>
 
   <script>
+    const strings = {
+      ko: {
+        documentTitle: 'EV211 현장 콘솔', languageToggleLabel: '영어로 전환', adminPasswordPlaceholder: '관리자 비밀번호 → 대시보드 · 송신자 비밀번호 → 송신 페이지', checking: '확인 중…', loginFailed: '접속 실패: {message}', bothPasswordsFailed: '접속 실패: 관리자·송신자 비밀번호가 모두 일치하지 않습니다. ({message})', adminMode: '관리자 모드', senderMode: '송신자 모드', passwordTooShort: '비밀번호는 4자 이상이어야 합니다.', passwordsDifferent: '두 입력이 일치하지 않습니다.', changing: '변경 중…', changeFailed: '변경 실패: {message}', passwordLength: '비밀번호는 4~64자여야 합니다.', passwordAscii: '비밀번호는 영문·숫자·기호(ASCII)만 사용할 수 있습니다.', passwordForbidden: '사용할 수 없는 비밀번호입니다.', changingAdmin: '관리자 비밀번호 변경 중…', adminChanged: '관리자 비밀번호가 변경됐습니다. 현재 로그인은 유지됩니다.', changeSenderConfirm: '송신자 비밀번호를 변경하면 기존 방송·수신·무전기 연결이 모두 끊깁니다. 계속할까요?', changingSender: '송신자 비밀번호 변경 및 음성 세션 갱신 중…', senderChanged: '송신자 비밀번호가 변경됐습니다. 기존 사용자는 새 비밀번호로 다시 접속해야 합니다.', onAir: '송신 중', connected: '접속됨', issued: '발급됨(미접속)', none: '없음', stopRecording: '녹음 종료', startRecording: '녹음 시작', startBroadcast: '송신 시작', monitorConnected: '송신 레벨 모니터 연결됨', monitorPrefix: '레벨 모니터: {message}', monitorFailed: '레벨 모니터 연결 실패(재시도 예정): {message}', totalListeners: '총 청취자 {count} · G{generation}', delete: '삭제', noChannels: '개설된 채널이 없습니다.', statusFailed: '현황 조회 실패: {message}', totalParticipants: '총 참가자 {count} · G{generation}', people: '{count}명', statusUnavailable: '상태 확인 실패', noIntercomChannels: '개설된 무전기 채널이 없습니다.', intercomMonitorFailed: '무전기 채널 {channel} 모니터 연결 실패: {message}', relay: '방송', intercom: '무전기', recordingStopped: '{kind} 채널 {channel} 녹음 종료됨', recordingStarted: '{kind} 채널 {channel} 서버 녹음 시작됨', recordingFailed: '녹음 작업 실패: {message}', recording: '녹음 중', seconds: '{count}초', downloadMp3: 'MP3 다운로드', noRecordings: '저장된 녹음이 없습니다.', downloadFailed: '녹음 다운로드 실패: {message}', waiting: '대기', noSenderChannels: '개설된 채널이 없습니다. 아래에서 채널 번호·언어를 정해 송신을 시작하면 자동 개설됩니다.', emptySlot: '빈 슬롯(개설됨)', unopened: '미개설(자동 개설)', deleteChannelConfirm: '채널 {channel}을(를) 삭제할까요? 해당 채널 송신자의 연결이 끊깁니다.', channelDeleted: '채널 {channel} 삭제됨', deleteFailed: '삭제 실패: {message}', microphonePermission: '마이크 권한 필요: {message}', microphone: '마이크 {id}', senderPasswordRequired: '송신자 비밀번호를 입력하세요.', preparing: '준비 중…', checkingChannel: '채널 {channel} 확인 중…', prepareChannel: '송신 준비: 채널 {channel} 확인 중…', channelCreated: '채널 {channel} 개설됨', usingChannel: '기존 채널 {channel} 사용', issuingPermission: '권한 발급 중…', issuingSendPermission: '송신 권한 발급 중…', preparingConnection: '송신 준비: 접속 권한 발급 중…', connecting: '서버 연결 중…', connectingVoice: '음성 서버 연결 중…', connectingVoiceLog: '송신 준비: 음성 서버 연결 중…', voiceTimeout: '음성 서버 연결 시간이 12초를 초과했습니다.', connectingMic: '마이크 연결 중…', defaultMic: '기본 마이크', connectingMicStatus: '마이크 연결 중… ({microphone})', connectingMicLog: '송신 준비: 마이크 연결 중… ({microphone})', micTimeout: '마이크 연결 시간이 10초를 초과했습니다. 브라우저 마이크 권한과 입력 장치를 확인하세요.', publishTimeout: '마이크 송신 시작 시간이 10초를 초과했습니다.', publishStarted: '송신 시작: 채널 {channel} ({track})', publishing: '송신 중', channelPublishing: '채널 {channel} 송신 중', invalidSenderPassword: '송신자 비밀번호가 올바르지 않습니다.', publishFailed: '송신 시작 실패: {message}', stopped: '송신 정지됨', sendWaiting: '송신 대기', logoutMessage: '로그아웃했습니다. 다른 비밀번호로 다시 접속할 수 있습니다.', idle: '대기 중…', errorFallback: '요청을 완료하지 못했습니다.',
+      },
+      en: {
+        documentTitle: 'EV211 Field Console', languageToggleLabel: 'Switch to Korean', adminPasswordPlaceholder: 'Administrator password → dashboard · sender password → broadcast page', checking: 'Checking.', loginFailed: 'Sign-in failed: {message}', bothPasswordsFailed: 'Sign-in failed: neither the administrator nor sender password matched. ({message})', adminMode: 'Administrator mode', senderMode: 'Sender mode', passwordTooShort: 'Password must be at least 4 characters.', passwordsDifferent: 'The two passwords do not match.', changing: 'Changing.', changeFailed: 'Change failed: {message}', passwordLength: 'Password must be 4–64 characters.', passwordAscii: 'Password may use only ASCII letters, numbers, and symbols.', passwordForbidden: 'This password cannot be used.', changingAdmin: 'Changing administrator password.', adminChanged: 'Administrator password changed. Your current session remains active.', changeSenderConfirm: 'Changing the sender password disconnects all broadcasts, listeners, and intercom sessions. Continue?', changingSender: 'Changing sender password and renewing voice sessions.', senderChanged: 'Sender password changed. Existing users must sign in again with the new password.', onAir: 'On air', connected: 'Connected', issued: 'Issued (not connected)', none: 'None', stopRecording: 'Stop recording', startRecording: 'Start recording', startBroadcast: 'Start broadcast', monitorConnected: 'Broadcast-level monitor connected', monitorPrefix: 'Level monitor: {message}', monitorFailed: 'Broadcast-level monitor connection failed; retrying: {message}', totalListeners: 'Total listeners {count} · G{generation}', delete: 'Delete', noChannels: 'There are no open channels.', statusFailed: 'Could not load status: {message}', totalParticipants: 'Total participants {count} · G{generation}', people: '{count} people', statusUnavailable: 'Status unavailable', noIntercomChannels: 'There are no open intercom channels.', intercomMonitorFailed: 'Intercom channel {channel} monitor connection failed: {message}', relay: 'Broadcast', intercom: 'Intercom', recordingStopped: '{kind} channel {channel} recording stopped', recordingStarted: '{kind} channel {channel} server recording started', recordingFailed: 'Recording operation failed: {message}', recording: 'Recording', seconds: '{count}s', downloadMp3: 'Download MP3', noRecordings: 'There are no saved recordings.', downloadFailed: 'Recording download failed: {message}', waiting: 'Waiting', noSenderChannels: 'There are no open channels. Select a channel number and language below to create one automatically when you start broadcasting.', emptySlot: 'Empty slot (open)', unopened: 'Not open (created automatically)', deleteChannelConfirm: 'Delete channel {channel}? The sender on this channel will be disconnected.', channelDeleted: 'Channel {channel} deleted', deleteFailed: 'Delete failed: {message}', microphonePermission: 'Microphone permission is required: {message}', microphone: 'Microphone {id}', senderPasswordRequired: 'Enter the sender password.', preparing: 'Preparing.', checkingChannel: 'Checking channel {channel}.', prepareChannel: 'Preparing broadcast: checking channel {channel}.', channelCreated: 'Channel {channel} created', usingChannel: 'Using existing channel {channel}', issuingPermission: 'Issuing permission.', issuingSendPermission: 'Issuing broadcast permission.', preparingConnection: 'Preparing broadcast: issuing connection permission.', connecting: 'Connecting to server.', connectingVoice: 'Connecting to voice server.', connectingVoiceLog: 'Preparing broadcast: connecting to voice server.', voiceTimeout: 'Voice-server connection exceeded 12 seconds.', connectingMic: 'Connecting microphone.', defaultMic: 'Default microphone', connectingMicStatus: 'Connecting microphone. ({microphone})', connectingMicLog: 'Preparing broadcast: connecting microphone. ({microphone})', micTimeout: 'Microphone connection exceeded 10 seconds. Check browser microphone permission and input device.', publishTimeout: 'Starting microphone broadcast exceeded 10 seconds.', publishStarted: 'Broadcast started: channel {channel} ({track})', publishing: 'Broadcasting', channelPublishing: 'Channel {channel} broadcasting', invalidSenderPassword: 'The sender password is incorrect.', publishFailed: 'Could not start broadcast: {message}', stopped: 'Broadcast stopped', sendWaiting: 'Waiting to broadcast', logoutMessage: 'You signed out. You can sign in again with a different password.', idle: 'Idle.', errorFallback: 'The request could not be completed.',
+      },
+      text: {
+        '현장 콘솔': { ko: '현장 콘솔', en: 'Field Console' }, '비밀번호 (관리자 또는 송신자)': { ko: '비밀번호 (관리자 또는 송신자)', en: 'Password (administrator or sender)' }, '접속': { ko: '접속', en: 'Sign in' }, '로그아웃': { ko: '로그아웃', en: 'Sign out' }, '관리자 비밀번호 변경': { ko: '관리자 비밀번호 변경', en: 'Change administrator password' }, '초기 비밀번호(0000)로 접속했습니다. 보안을 위해': { ko: '초기 비밀번호(0000)로 접속했습니다. 보안을 위해', en: 'You signed in with the initial password (0000). For security,' }, '새 비밀번호로 변경해야': { ko: '새 비밀번호로 변경해야', en: 'you must change it to a new password' }, '관리자 기능(채널 삭제·바로미터 등)을 사용할 수 있습니다.': { ko: '관리자 기능(채널 삭제·바로미터 등)을 사용할 수 있습니다.', en: 'before using administrator features such as channel deletion and level meters.' }, '새 비밀번호 (4자 이상, 영문·숫자·기호)': { ko: '새 비밀번호 (4자 이상, 영문·숫자·기호)', en: 'New password (at least 4 ASCII characters)' }, '새 비밀번호 확인': { ko: '새 비밀번호 확인', en: 'Confirm new password' }, '변경': { ko: '변경', en: 'Change' }, '비밀번호 관리': { ko: '비밀번호 관리', en: 'Password management' }, '비밀번호는 4~64자의 영문·숫자·기호를 사용하고 서로 다르게 설정하세요.': { ko: '비밀번호는 4~64자의 영문·숫자·기호를 사용하고 서로 다르게 설정하세요.', en: 'Use different passwords of 4–64 ASCII letters, numbers, or symbols.' }, '새 관리자 비밀번호': { ko: '새 관리자 비밀번호', en: 'New administrator password' }, '새 관리자 비밀번호 확인': { ko: '새 관리자 비밀번호 확인', en: 'Confirm administrator password' }, '송신자 비밀번호 변경': { ko: '송신자 비밀번호 변경', en: 'Change sender password' }, '변경하면 기존 방송·수신·무전기 연결이 모두 끊기고 새 비밀번호로 다시 접속해야 합니다.': { ko: '변경하면 기존 방송·수신·무전기 연결이 모두 끊기고 새 비밀번호로 다시 접속해야 합니다.', en: 'Changing it disconnects all broadcasts, listeners, and intercom sessions; users must sign in again with the new password.' }, '새 송신자 비밀번호': { ko: '새 송신자 비밀번호', en: 'New sender password' }, '새 송신자 비밀번호 확인': { ko: '새 송신자 비밀번호 확인', en: 'Confirm sender password' }, '채널 현황': { ko: '채널 현황', en: 'Channel status' }, '채널': { ko: '채널', en: 'Channel' }, '언어(라벨)': { ko: '언어(라벨)', en: 'Language (label)' }, '송신자 상태': { ko: '송신자 상태', en: 'Sender status' }, '청취자': { ko: '청취자', en: 'Listeners' }, '녹음': { ko: '녹음', en: 'Recording' }, '불러오는 중…': { ko: '불러오는 중…', en: 'Loading.' }, '무전기 채널': { ko: '무전기 채널', en: 'Intercom channels' }, '이름': { ko: '이름', en: 'Name' }, '참가자': { ko: '참가자', en: 'Participants' }, '채널 음성': { ko: '채널 음성', en: 'Channel audio' }, '서버 녹음 파일': { ko: '서버 녹음 파일', en: 'Server recordings' }, '녹음은 서버에서 계속되므로 이 브라우저를 닫아도 유지됩니다.': { ko: '녹음은 서버에서 계속되므로 이 브라우저를 닫아도 유지됩니다.', en: 'Recording continues on the server even if this browser is closed.' }, '종류': { ko: '종류', en: 'Type' }, '시작': { ko: '시작', en: 'Started' }, '길이': { ko: '길이', en: 'Duration' }, '크기': { ko: '크기', en: 'Size' }, '상태': { ko: '상태', en: 'Status' }, '브라우저 송신': { ko: '브라우저 송신', en: 'Browser broadcast' }, '송신에는': { ko: '송신에는', en: 'Broadcasting requires the' }, '송신자 비밀번호': { ko: '송신자 비밀번호', en: 'sender password' }, '가 필요합니다. 이 페이지는 송신 전용이며 수신(모니터링 청취) 기능은 없습니다.': { ko: '가 필요합니다. 이 페이지는 송신 전용이며 수신(모니터링 청취) 기능은 없습니다.', en: '. This page broadcasts only and cannot receive or monitor audio.' }, '채널 번호 (0=Floor)': { ko: '채널 번호 (0=Floor)', en: 'Channel number (0 = Floor)' }, '언어 코드 (새 채널 개설 시)': { ko: '언어 코드 (새 채널 개설 시)', en: 'Language code (when creating a channel)' }, '라벨 (새 채널 개설 시)': { ko: '라벨 (새 채널 개설 시)', en: 'Label (when creating a channel)' }, '마이크 장치': { ko: '마이크 장치', en: 'Microphone device' }, '송신 시작': { ko: '송신 시작', en: 'Start broadcast' }, '송신 정지': { ko: '송신 정지', en: 'Stop broadcast' }, '송신 대기': { ko: '송신 대기', en: 'Waiting to broadcast' }, '대기 중…': { ko: '대기 중…', en: 'Idle.' },
+      },
+    };
+    let translateDynamic = () => {};
+    const i18n = window.EV211I18n.create(strings, () => translateDynamic());
+    const t = (key, values) => i18n.t(key, values);
+    const errorMessage = (error) => i18n.language === 'en' ? t('errorFallback') : error.message;
     const LK = window.LivekitClient;
     const $ = (id) => document.getElementById(id);
     const logEl = $('log');
@@ -218,6 +234,10 @@
     let sessionMode = null;
     let pollTimer = null;
     let recordingState = { active: [], recordings: [] };
+    translateDynamic = () => {
+      if (sessionMode === 'admin') refresh();
+      if (sessionMode === 'sender') senderRefresh();
+    };
 
     // ⚠ LiveKit SDK 는 base URL 에 스스로 `/rtc` 를 붙인다(스파이크 페이지와 동일 규약).
     function defaultWsUrl() {
@@ -261,7 +281,7 @@
     $('loginBtn').onclick = async () => {
       const pw = $('adminPw').value.trim();
       if (!pw) return;
-      $('loginMsg').textContent = '확인 중…';
+      $('loginMsg').textContent = t('checking');
       try {
         await api('/admin/status', {}, pw);
         if (pw === '0000') {
@@ -277,7 +297,7 @@
       } catch (e) {
         // 잠금·율제한은 송신자 시도로 넘어가지 않고 그대로 안내한다(추가 실패 기록 방지).
         if (e.code === 'locked' || e.code === 'rate_limited' || e.code === 'https_required') {
-          $('loginMsg').textContent = '접속 실패: ' + e.message;
+          $('loginMsg').textContent = t('loginFailed', { message: errorMessage(e) });
           return;
         }
       }
@@ -285,7 +305,7 @@
         await api('/intercom-tokens', { method: 'POST', body: '{}' }, pw);
         enterSenderMode(pw);
       } catch (e) {
-        $('loginMsg').textContent = '접속 실패: 관리자·송신자 비밀번호가 모두 일치하지 않습니다. (' + e.message + ')';
+        $('loginMsg').textContent = t('bothPasswordsFailed', { message: errorMessage(e) });
       }
     };
     $('adminPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
@@ -302,7 +322,7 @@
 
     function showSession(mode) {
       sessionMode = mode;
-      $('sessionLabel').textContent = mode === 'admin' ? '관리자 모드' : '송신자 모드';
+      $('sessionLabel').textContent = mode === 'admin' ? t('adminMode') : t('senderMode');
       $('sessionSec').classList.remove('hidden');
     }
 
@@ -343,9 +363,9 @@
     $('pwChangeBtn').onclick = async () => {
       const p1 = $('newPw').value.trim();
       const p2 = $('newPw2').value.trim();
-      if (p1.length < 4) { $('pwChangeMsg').textContent = '비밀번호는 4자 이상이어야 합니다.'; return; }
-      if (p1 !== p2) { $('pwChangeMsg').textContent = '두 입력이 일치하지 않습니다.'; return; }
-      $('pwChangeMsg').textContent = '변경 중…';
+      if (p1.length < 4) { $('pwChangeMsg').textContent = t('passwordTooShort'); return; }
+      if (p1 !== p2) { $('pwChangeMsg').textContent = t('passwordsDifferent'); return; }
+      $('pwChangeMsg').textContent = t('changing');
       try {
         await api('/admin/passwords/admin', {
           method: 'PUT',
@@ -355,7 +375,7 @@
         $('adminPw').value = p1;
         enterAdminMode(p1);
       } catch (e) {
-        $('pwChangeMsg').textContent = '변경 실패: ' + e.message;
+        $('pwChangeMsg').textContent = t('changeFailed', { message: errorMessage(e) });
       }
     };
 
@@ -364,19 +384,19 @@
       const second = $(secondId).value.trim();
       const message = $(messageId);
       if (first.length < 4 || first.length > 64) {
-        message.textContent = '비밀번호는 4~64자여야 합니다.';
+        message.textContent = t('passwordLength');
         return null;
       }
       if (!/^[\x20-\x7e]+$/.test(first)) {
-        message.textContent = '비밀번호는 영문·숫자·기호(ASCII)만 사용할 수 있습니다.';
+        message.textContent = t('passwordAscii');
         return null;
       }
       if (['0000', 'change-me', 'changeme', 'password', 'default'].includes(first.toLowerCase())) {
-        message.textContent = '사용할 수 없는 비밀번호입니다.';
+        message.textContent = t('passwordForbidden');
         return null;
       }
       if (first !== second) {
-        message.textContent = '두 입력이 일치하지 않습니다.';
+        message.textContent = t('passwordsDifferent');
         return null;
       }
       return first;
@@ -387,7 +407,7 @@
       if (!nextPassword) return;
       const button = $('manageAdminBtn');
       button.disabled = true;
-      $('manageAdminMsg').textContent = '관리자 비밀번호 변경 중…';
+      $('manageAdminMsg').textContent = t('changingAdmin');
       try {
         await api('/admin/passwords/admin', {
           method: 'PUT',
@@ -397,9 +417,9 @@
         $('adminPw').value = nextPassword;
         $('manageAdminPw').value = '';
         $('manageAdminPw2').value = '';
-        $('manageAdminMsg').textContent = '관리자 비밀번호가 변경됐습니다. 현재 로그인은 유지됩니다.';
+        $('manageAdminMsg').textContent = t('adminChanged');
       } catch (e) {
-        $('manageAdminMsg').textContent = '변경 실패: ' + e.message;
+        $('manageAdminMsg').textContent = t('changeFailed', { message: errorMessage(e) });
       } finally {
         button.disabled = false;
       }
@@ -408,10 +428,10 @@
     $('manageSendBtn').onclick = async () => {
       const nextPassword = readPasswordPair('manageSendPw', 'manageSendPw2', 'manageSendMsg');
       if (!nextPassword) return;
-      if (!confirm('송신자 비밀번호를 변경하면 기존 방송·수신·무전기 연결이 모두 끊깁니다. 계속할까요?')) return;
+      if (!confirm(t('changeSenderConfirm'))) return;
       const button = $('manageSendBtn');
       button.disabled = true;
-      $('manageSendMsg').textContent = '송신자 비밀번호 변경 및 음성 세션 갱신 중…';
+      $('manageSendMsg').textContent = t('changingSender');
       try {
         await api('/admin/passwords/send', {
           method: 'PUT',
@@ -421,20 +441,20 @@
         $('sendPw').value = nextPassword;
         $('manageSendPw').value = '';
         $('manageSendPw2').value = '';
-        $('manageSendMsg').textContent = '송신자 비밀번호가 변경됐습니다. 기존 사용자는 새 비밀번호로 다시 접속해야 합니다.';
+        $('manageSendMsg').textContent = t('senderChanged');
         await refresh();
       } catch (e) {
-        $('manageSendMsg').textContent = '변경 실패: ' + e.message;
+        $('manageSendMsg').textContent = t('changeFailed', { message: errorMessage(e) });
       } finally {
         button.disabled = false;
       }
     };
 
     function pubState(ch) {
-      if (ch.on_air) return '<span class="pill red">송신 중</span>';
-      if (ch.lease_held && ch.publisher_joined_at) return '<span class="pill green">접속됨</span>';
-      if (ch.lease_held) return '<span class="pill gray">발급됨(미접속)</span>';
-      return '<span class="pill gray">없음</span>';
+      if (ch.on_air) return `<span class="pill red">${t('onAir')}</span>`;
+      if (ch.lease_held && ch.publisher_joined_at) return `<span class="pill green">${t('connected')}</span>`;
+      if (ch.lease_held) return `<span class="pill gray">${t('issued')}</span>`;
+      return `<span class="pill gray">${t('none')}</span>`;
     }
 
     // ── 송신 바로미터(실시간 오디오 레벨) ────────────────
@@ -464,9 +484,9 @@
     function recordingButton(kind, channelId) {
       const active = recordingFor(kind, channelId);
       if (active) {
-        return `<button class="danger small" onclick="toggleRecording('${kind}', ${channelId}, '${active.recording_id}')">녹음 종료</button>`;
+        return `<button class="danger small" onclick="toggleRecording('${kind}', ${channelId}, '${active.recording_id}')">${t('stopRecording')}</button>`;
       }
-      return `<button class="small" onclick="toggleRecording('${kind}', ${channelId}, '')">녹음 시작</button>`;
+      return `<button class="small" onclick="toggleRecording('${kind}', ${channelId}, '')">${t('startRecording')}</button>`;
     }
 
     function onSpeakers(speakers) {
@@ -491,11 +511,11 @@
         });
         await room.connect(defaultWsUrl(), grant.token, { autoSubscribe: true });
         monitorRoom = room;
-        log('송신 레벨 모니터 연결됨');
+        log(t('monitorConnected'));
       } catch (e) {
         // 초기 비밀번호(0000) 상태면 모니터 없이 동작한다(재시도 없음).
-        if (e.code === 'must_change_password') { log('레벨 모니터: ' + e.message); return; }
-        log('레벨 모니터 연결 실패(재시도 예정): ' + e.message);
+        if (e.code === 'must_change_password') { log(t('monitorPrefix', { message: errorMessage(e) })); return; }
+        log(t('monitorFailed', { message: errorMessage(e) }));
         scheduleMonitorRetry(10000);
       }
     }
@@ -514,7 +534,7 @@
           api('/admin/recordings', {}, adminPw),
         ]);
         recordingState = recordings;
-        $('summary').textContent = `총 청취자 ${st.total_listeners} · G${st.generation}`;
+        $('summary').textContent = t('totalListeners', { count: st.total_listeners, generation: st.generation });
         const open = st.channels.filter(c => c.state === 'open');
         const rows = open.map(c => `
           <tr>
@@ -523,15 +543,15 @@
             <td>${pubState(c)}<span class="chmeter"><span class="chmeter-fill" id="lvl-${c.channel_id}" style="width:${levelWidth(levels[c.channel_id] || 0)}%"></span></span></td>
             <td>${c.listeners}</td>
             <td>${recordingButton('relay', c.channel_id)}</td>
-            <td><button class="danger small" onclick="delCh(${c.channel_id})">삭제</button></td>
+            <td><button class="danger small" onclick="delCh(${c.channel_id})">${t('delete')}</button></td>
           </tr>`).join('');
-        $('chRows').innerHTML = rows || '<tr><td colspan="6" class="muted-txt">개설된 채널이 없습니다.</td></tr>';
+        $('chRows').innerHTML = rows || `<tr><td colspan="6" class="muted-txt">${t('noChannels')}</td></tr>`;
         renderIntercom(intercom);
         renderRecordings(recordings.active, recordings.recordings);
         syncIntercomMonitors(intercom.channels);
         updateSendChannelOptions(open);
       } catch (e) {
-        log('현황 조회 실패: ' + e.message);
+        log(t('statusFailed', { message: errorMessage(e) }));
       }
     }
 
@@ -541,10 +561,10 @@
     let intercomWanted = new Set();
 
     function renderIntercom(status) {
-      $('intercomSummary').textContent = `총 참가자 ${status.total_participants} · G${status.generation}`;
+      $('intercomSummary').textContent = t('totalParticipants', { count: status.total_participants, generation: status.generation });
       const rows = status.channels.map(c => {
         const names = c.participants.map(p => escapeHtml(p.name || p.identity)).join(', ');
-        const availability = c.available ? `${c.participant_count}명` : '상태 확인 실패';
+        const availability = c.available ? t('people', { count: c.participant_count }) : t('statusUnavailable');
         return `<tr>
           <td>${c.channel_id}</td>
           <td>${escapeHtml(c.name)}</td>
@@ -553,7 +573,7 @@
           <td>${recordingButton('intercom', c.channel_id)}</td>
         </tr>`;
       }).join('');
-      $('intercomRows').innerHTML = rows || '<tr><td colspan="5" class="muted-txt">개설된 무전기 채널이 없습니다.</td></tr>';
+      $('intercomRows').innerHTML = rows || `<tr><td colspan="5" class="muted-txt">${t('noIntercomChannels')}</td></tr>`;
     }
 
     function paintIntercomLevel(channelId, level) {
@@ -586,7 +606,7 @@
         intercomMonitorRooms.set(channelId, room);
       } catch (e) {
         intercomMonitorRooms.delete(channelId);
-        log(`무전기 채널 ${channelId} 모니터 연결 실패: ${e.message}`);
+        log(t('intercomMonitorFailed', { channel: channelId, message: errorMessage(e) }));
       }
     }
 
@@ -608,17 +628,17 @@
       try {
         if (recordingId) {
           await api(`/admin/recordings/${recordingId}/stop`, { method: 'POST' }, adminPw);
-          log(`${kind === 'relay' ? '방송' : '무전기'} 채널 ${channelId} 녹음 종료됨`);
+          log(t('recordingStopped', { kind: t(kind), channel: channelId }));
         } else {
           await api('/admin/recordings', {
             method: 'POST',
             body: JSON.stringify({ kind, channel_id: channelId }),
           }, adminPw);
-          log(`${kind === 'relay' ? '방송' : '무전기'} 채널 ${channelId} 서버 녹음 시작됨`);
+          log(t('recordingStarted', { kind: t(kind), channel: channelId }));
         }
         await refresh();
       } catch (e) {
-        log('녹음 작업 실패: ' + e.message);
+        log(t('recordingFailed', { message: errorMessage(e) }));
       }
     };
 
@@ -626,16 +646,16 @@
       const all = [...active, ...recordings];
       const rows = all.map(r => `
         <tr>
-          <td>${r.kind === 'relay' ? '방송' : '무전기'}</td>
+          <td>${t(r.kind)}</td>
           <td>${r.channel_id} · ${escapeHtml(r.label)}</td>
           <td>${new Date(r.started_at).toLocaleString()}</td>
-          <td>${r.active ? '<span class="pill red">녹음 중</span>' : Math.round(r.duration_seconds || 0) + '초'}</td>
+          <td>${r.active ? `<span class="pill red">${t('recording')}</span>` : t('seconds', { count: Math.round(r.duration_seconds || 0) })}</td>
           <td>${r.size_bytes == null ? '-' : (r.size_bytes / 1024 / 1024).toFixed(1) + 'MB'}</td>
           <td>${r.active
-            ? `<button class="danger small" onclick="toggleRecording('${r.kind}', ${r.channel_id}, '${r.recording_id}')">녹음 종료</button>`
-            : `<button class="small" onclick="downloadRecording('${r.recording_id}')">MP3 다운로드</button>`}</td>
+            ? `<button class="danger small" onclick="toggleRecording('${r.kind}', ${r.channel_id}, '${r.recording_id}')">${t('stopRecording')}</button>`
+            : `<button class="small" onclick="downloadRecording('${r.recording_id}')">${t('downloadMp3')}</button>`}</td>
         </tr>`).join('');
-      $('recordingRows').innerHTML = rows || '<tr><td colspan="6" class="muted-txt">저장된 녹음이 없습니다.</td></tr>';
+      $('recordingRows').innerHTML = rows || `<tr><td colspan="6" class="muted-txt">${t('noRecordings')}</td></tr>`;
     }
 
     window.downloadRecording = async (recordingId) => {
@@ -655,7 +675,7 @@
         a.click();
         URL.revokeObjectURL(url);
       } catch (e) {
-        log('녹음 다운로드 실패: ' + e.message);
+        log(t('downloadFailed', { message: errorMessage(e) }));
       }
     };
 
@@ -663,19 +683,19 @@
     async function senderRefresh() {
       try {
         const st = await api('/status');
-        $('senderSummary').textContent = `총 청취자 ${st.total_listeners} · G${st.generation}`;
+        $('senderSummary').textContent = t('totalListeners', { count: st.total_listeners, generation: st.generation });
         const open = st.channels.filter(c => c.state === 'open');
         const rows = open.map(c => `
           <tr>
             <td>${c.channel_id}${c.channel_id === 0 ? ' <span class="pill gray">Floor</span>' : ''}</td>
             <td>${escapeHtml(c.label)} <span class="muted-txt">(${escapeHtml(c.language)})</span></td>
-            <td>${c.on_air ? '<span class="pill red">송신 중</span>' : '<span class="pill gray">대기</span>'}</td>
+            <td>${c.on_air ? `<span class="pill red">${t('onAir')}</span>` : `<span class="pill gray">${t('waiting')}</span>`}</td>
             <td>${c.listeners}</td>
           </tr>`).join('');
-        $('senderRows').innerHTML = rows || '<tr><td colspan="4" class="muted-txt">개설된 채널이 없습니다. 아래에서 채널 번호·언어를 정해 송신을 시작하면 자동 개설됩니다.</td></tr>';
+        $('senderRows').innerHTML = rows || `<tr><td colspan="4" class="muted-txt">${t('noSenderChannels')}</td></tr>`;
         updateSendChannelOptions(open);
       } catch (e) {
-        log('현황 조회 실패: ' + e.message);
+        log(t('statusFailed', { message: errorMessage(e) }));
       }
     }
 
@@ -688,8 +708,8 @@
         const cur = open.find(c => c.channel_id === i);
         const opt = document.createElement('option');
         opt.value = i;
-        opt.textContent = i + (i === 0 ? ' (Floor)' : '') + (cur ? ` — ${cur.label}${cur.on_air ? ' · 송신 중' : ''}` : ' — 빈 슬롯(개설됨)');
-        if (!cur) opt.textContent = i + (i === 0 ? ' (Floor)' : '') + ' — 미개설(자동 개설)';
+        opt.textContent = i + (i === 0 ? ' (Floor)' : '') + (cur ? ` — ${cur.label}${cur.on_air ? ` · ${t('onAir')}` : ''}` : ` — ${t('emptySlot')}`);
+        if (!cur) opt.textContent = i + (i === 0 ? ' (Floor)' : '') + ` — ${t('unopened')}`;
         sel.appendChild(opt);
       }
       if (prev) sel.value = prev;
@@ -700,12 +720,12 @@
     }
 
     window.delCh = async (id) => {
-      if (!confirm(`채널 ${id} 을(를) 삭제할까요? 해당 채널 송신자의 연결이 끊깁니다.`)) return;
+      if (!confirm(t('deleteChannelConfirm', { channel: id }))) return;
       try {
         await api(`/channels/${id}`, { method: 'DELETE' }, adminPw);
-        log(`채널 ${id} 삭제됨`);
+        log(t('channelDeleted', { channel: id }));
         refresh();
-      } catch (e) { log('삭제 실패: ' + e.message); }
+      } catch (e) { log(t('deleteFailed', { message: errorMessage(e) })); }
     };
 
     // ── 웹 송신 ─────────────────────────────────────────
@@ -715,13 +735,13 @@
       try {
         const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
         tmp.getTracks().forEach(t => t.stop());
-      } catch (e) { log('마이크 권한 필요: ' + e.message); }
+      } catch (e) { log(t('microphonePermission', { message: errorMessage(e) })); }
       const devices = await navigator.mediaDevices.enumerateDevices();
       const micSel = $('mic');
       micSel.innerHTML = '';
       devices.filter(d => d.kind === 'audioinput').forEach(d => {
         const opt = document.createElement('option');
-        opt.value = d.deviceId; opt.textContent = d.label || ('마이크 ' + d.deviceId.slice(0, 6));
+        opt.value = d.deviceId; opt.textContent = d.label || t('microphone', { id: d.deviceId.slice(0, 6) });
         micSel.appendChild(opt);
       });
     }
@@ -730,18 +750,18 @@
       const sendPw = $('sendPw').value.trim();
       const channelId = parseInt($('sendCh').value, 10);
       if (!sendPw) {
-        setSendStatus('송신자 비밀번호를 입력하세요.', true);
-        log('송신자 비밀번호를 입력하세요');
+        setSendStatus(t('senderPasswordRequired'), true);
+        log(t('senderPasswordRequired'));
         $('sendPw').focus();
         return;
       }
       $('startBtn').disabled = true;
-      $('startBtn').textContent = '준비 중…';
-      setSendStatus(`채널 ${channelId} 확인 중…`);
+      $('startBtn').textContent = t('preparing');
+      setSendStatus(t('checkingChannel', { channel: channelId }));
       let localTrack = null;
       try {
         // 채널이 없으면 개설(이미 있으면 409 무시하고 발급 진행).
-        log(`송신 준비: 채널 ${channelId} 확인 중…`);
+        log(t('prepareChannel', { channel: channelId }));
         try {
           await api('/channels', {
             method: 'POST',
@@ -751,34 +771,34 @@
               label: $('sendLabel').value.trim() || 'Korean (한국어)',
             }),
           }, sendPw);
-          log(`채널 ${channelId} 개설됨`);
+          log(t('channelCreated', { channel: channelId }));
         } catch (e) {
           if (e.code !== 'max_channels_reached' || e.message !== '이미 개설된 채널입니다.') throw e;
-          log(`기존 채널 ${channelId} 사용`);
+          log(t('usingChannel', { channel: channelId }));
         }
 
-        $('startBtn').textContent = '권한 발급 중…';
-        setSendStatus('송신 권한 발급 중…');
-        log('송신 준비: 접속 권한 발급 중…');
+        $('startBtn').textContent = t('issuingPermission');
+        setSendStatus(t('issuingSendPermission'));
+        log(t('preparingConnection'));
         const grant = await api('/publish-tokens', {
           method: 'POST',
           body: JSON.stringify({ channel_id: channelId }),
         }, sendPw);
 
-        $('startBtn').textContent = '서버 연결 중…';
-        setSendStatus('음성 서버 연결 중…');
-        log('송신 준비: 음성 서버 연결 중…');
+        $('startBtn').textContent = t('connecting');
+        setSendStatus(t('connectingVoice'));
+        log(t('connectingVoiceLog'));
         room = new LK.Room({ adaptiveStream: false, dynacast: false });
         await withTimeout(
           room.connect(defaultWsUrl(), grant.token),
           12000,
-          '음성 서버 연결 시간이 12초를 초과했습니다.',
+          t('voiceTimeout'),
         );
 
-        $('startBtn').textContent = '마이크 연결 중…';
-        const selectedMic = $('mic').selectedOptions[0]?.textContent || '기본 마이크';
-        setSendStatus(`마이크 연결 중… (${selectedMic})`);
-        log(`송신 준비: 마이크 연결 중… (${selectedMic})`);
+        $('startBtn').textContent = t('connectingMic');
+        const selectedMic = $('mic').selectedOptions[0]?.textContent || t('defaultMic');
+        setSendStatus(t('connectingMicStatus', { microphone: selectedMic }));
+        log(t('connectingMicLog', { microphone: selectedMic }));
         // 가상 장치(Voicemeeter 등) 루프백 캡처 시 브라우저 전처리(AEC/NS/AGC)가
         // 신호를 에코·노이즈로 오인해 무음이 되므로 전처리를 끈다.
         localTrack = await withTimeout(
@@ -789,7 +809,7 @@
             autoGainControl: false,
           }),
           10000,
-          '마이크 연결 시간이 10초를 초과했습니다. 브라우저 마이크 권한과 입력 장치를 확인하세요.',
+          t('micTimeout'),
         );
         await withTimeout(
           room.localParticipant.publishTrack(localTrack, {
@@ -798,9 +818,9 @@
             audioPreset: LK.AudioPresets.musicHighQuality,
           }),
           10000,
-          '마이크 송신 시작 시간이 10초를 초과했습니다.',
+          t('publishTimeout'),
         );
-        log(`송신 시작: 채널 ${channelId} (${grant.track_name})`);
+        log(t('publishStarted', { channel: channelId, track: grant.track_name }));
 
         // 레벨미터 (WebAudio)
         audioCtx = new AudioContext();
@@ -816,17 +836,17 @@
           $('meterFill').style.width = Math.min(100, (peak / 128) * 200) + '%';
           rafId = requestAnimationFrame(draw);
         })();
-        $('startBtn').textContent = '송신 중';
-        setSendStatus(`채널 ${channelId} 송신 중`);
+        $('startBtn').textContent = t('publishing');
+        setSendStatus(t('channelPublishing', { channel: channelId }));
         $('stopBtn').disabled = false;
         if (sessionMode === 'admin') refresh();
         if (sessionMode === 'sender') senderRefresh();
       } catch (e) {
         const message = e.code === 'unauthorized'
-          ? '송신자 비밀번호가 올바르지 않습니다.'
-          : e.message;
-        setSendStatus('송신 시작 실패: ' + message, true);
-        log('송신 시작 실패: ' + message);
+          ? t('invalidSenderPassword')
+          : errorMessage(e);
+        setSendStatus(t('publishFailed', { message }), true);
+        log(t('publishFailed', { message }));
         if (e.code === 'unauthorized') $('sendPw').focus();
         if (localTrack) {
           try { localTrack.stop(); } catch (_) { /* 이미 종료된 마이크 */ }
@@ -835,7 +855,7 @@
           try { await room.disconnect(); } catch (_) { /* 연결 전 실패 또는 이미 종료됨 */ }
           room = null;
         }
-        $('startBtn').textContent = '송신 시작';
+        $('startBtn').textContent = t('startBroadcast');
         $('startBtn').disabled = false;
         $('stopBtn').disabled = true;
       }
@@ -847,9 +867,9 @@
       if (audioCtx) { await audioCtx.close(); audioCtx = null; }
       $('meterFill').style.width = '0%';
       if (room) { await room.disconnect(); room = null; }
-      if (wasPublishing) log('송신 정지됨');
-      setSendStatus('송신 대기');
-      $('startBtn').textContent = '송신 시작';
+      if (wasPublishing) log(t('stopped'));
+      setSendStatus(t('sendWaiting'));
+      $('startBtn').textContent = t('startBroadcast');
       $('startBtn').disabled = false;
       $('stopBtn').disabled = true;
       if (refreshAfter) {
@@ -901,9 +921,9 @@
       $('senderSec').classList.add('hidden');
       $('sendSec').classList.add('hidden');
       $('loginSec').classList.remove('hidden');
-      $('loginMsg').textContent = '로그아웃했습니다. 다른 비밀번호로 다시 접속할 수 있습니다.';
-      setSendStatus('송신 대기');
-      logEl.textContent = '대기 중…';
+      $('loginMsg').textContent = t('logoutMessage');
+      setSendStatus(t('sendWaiting'));
+      logEl.textContent = t('idle');
       location.assign('/');
     };
   </script>

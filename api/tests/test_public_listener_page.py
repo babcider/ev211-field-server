@@ -26,6 +26,7 @@ def test_https_root_serves_public_listener_page_without_admin_redirect():
     caddyfile = (ROOT / "Caddyfile").read_text()
 
     assert "import web_no_cache" in caddyfile
+    assert "/i18n.js" in caddyfile
     assert "redir * /admin.html" not in caddyfile
 
 
@@ -34,3 +35,15 @@ def test_operator_logout_returns_to_public_listener_page():
 
     assert "$('logoutBtn').onclick = async () =>" in page
     assert "location.assign('/');" in page
+
+
+def test_public_and_operator_pages_include_english_language_switching():
+    listener = (ROOT / "web" / "index.html").read_text()
+    operator = (ROOT / "web" / "admin.html").read_text()
+    i18n = (ROOT / "web" / "i18n.js").read_text()
+
+    assert 'id="languageToggle"' in listener
+    assert 'id="languageToggle"' in operator
+    assert "EV211 Interpretation Listener" in listener
+    assert "EV211 Field Console" in operator
+    assert "localStorage.getItem(storageKey)" in i18n

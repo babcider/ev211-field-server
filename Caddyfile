@@ -28,7 +28,7 @@ http://:80 {
 
 # 공개 수신·관리자 페이지는 운영 중 자주 갱신되므로 브라우저 재검증 없이 저장하지 않는다.
 (web_no_cache) {
-	@web_page path / /index.html /admin.html
+	@web_page path / /index.html /admin.html /i18n.js
 	header @web_page {
 		Cache-Control "no-store, max-age=0, must-revalidate"
 		Pragma "no-cache"

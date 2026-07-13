@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>EV211 통역 수신</title>
   <script src="./vendor/livekit-client.umd.js"></script>
+  <script src="./i18n.js"></script>
   <style>
     :root { --canvas: #1c1624; --card: #2d2734; --elevated: #3a3340; --text: #f1f0ec; --muted: #d0c9c4; --dim: #a5a2a5; --iron: #55505b; --border: rgba(229, 231, 235, 0.14); --lavender: #b997ff; --green: #00f575; --ember: #ff5632; }
     * { box-sizing: border-box; }
@@ -38,36 +39,51 @@
 </head>
 <body>
   <header>
-    <h1><span class="brand">EV211</span> 통역 수신</h1>
-    <button id="loginToggle" class="secondary" type="button" aria-expanded="false" aria-controls="loginPanel">로그인</button>
-    <section id="loginPanel" class="card hidden" aria-label="운영자 로그인">
+    <h1><span class="brand">EV211</span> <span data-i18n="pageTitle">통역 수신</span></h1>
+    <div class="actions" style="margin-top:0">
+      <button id="languageToggle" class="secondary" type="button"></button>
+      <button id="loginToggle" class="secondary" type="button" aria-expanded="false" aria-controls="loginPanel" data-i18n="login">로그인</button>
+    </div>
+    <section id="loginPanel" class="card hidden" data-i18n-aria-label="operatorLogin" aria-label="운영자 로그인">
       <form id="loginForm">
-        <label for="operatorPassword">관리자 또는 송신자 비밀번호</label>
+        <label for="operatorPassword" data-i18n="operatorPassword">관리자 또는 송신자 비밀번호</label>
         <input id="operatorPassword" type="password" autocomplete="current-password" required />
-        <div class="actions"><button type="submit">운영 화면 열기</button></div>
+        <div class="actions"><button type="submit" data-i18n="openOperator">운영 화면 열기</button></div>
       </form>
-      <p class="login-note">수신자는 비밀번호 없이 아래에서 통역 채널을 선택해 들을 수 있습니다.</p>
+      <p class="login-note" data-i18n="loginNote">수신자는 비밀번호 없이 아래에서 통역 채널을 선택해 들을 수 있습니다.</p>
     </section>
   </header>
 
   <main class="card">
-    <h2>통역 채널 선택</h2>
-    <p>원하는 언어 채널을 선택한 뒤 듣기를 누르세요. 송신이 시작되면 자동으로 재생합니다.</p>
+    <h2 data-i18n="selectChannel">통역 채널 선택</h2>
+    <p data-i18n="selectDescription">원하는 언어 채널을 선택한 뒤 듣기를 누르세요. 송신이 시작되면 자동으로 재생합니다.</p>
 
-    <label for="channel">현재 개설된 채널</label>
-    <select id="channel" disabled><option>채널을 불러오는 중입니다.</option></select>
+    <label for="channel" data-i18n="openChannels">현재 개설된 채널</label>
+    <select id="channel" disabled><option data-i18n="loadingChannels">채널을 불러오는 중입니다.</option></select>
     <div class="actions">
-      <button id="startButton" type="button" disabled>듣기 시작</button>
-      <button id="stopButton" type="button" class="danger" disabled>듣기 중지</button>
-      <button id="refreshButton" type="button" class="secondary">채널 새로고침</button>
+      <button id="startButton" type="button" disabled data-i18n="startListening">듣기 시작</button>
+      <button id="stopButton" type="button" class="danger" disabled data-i18n="stopListening">듣기 중지</button>
+      <button id="refreshButton" type="button" class="secondary" data-i18n="refreshChannels">채널 새로고침</button>
     </div>
-    <div id="listenStatus" role="status" aria-live="polite">채널을 불러오는 중입니다.</div>
+    <div id="listenStatus" role="status" aria-live="polite" data-i18n="loadingChannels">채널을 불러오는 중입니다.</div>
     <audio id="player" controls autoplay></audio>
 
-    <ul id="channelList" aria-label="개설된 통역 채널"></ul>
+    <ul id="channelList" data-i18n-aria-label="openChannels" aria-label="개설된 통역 채널"></ul>
   </main>
 
   <script>
+    const strings = {
+      ko: {
+        documentTitle: 'EV211 통역 수신', pageTitle: '통역 수신', languageToggleLabel: '영어로 전환', login: '로그인', operatorLogin: '운영자 로그인', operatorPassword: '관리자 또는 송신자 비밀번호', openOperator: '운영 화면 열기', loginNote: '수신자는 비밀번호 없이 아래에서 통역 채널을 선택해 들을 수 있습니다.', selectChannel: '통역 채널 선택', selectDescription: '원하는 언어 채널을 선택한 뒤 듣기를 누르세요. 송신이 시작되면 자동으로 재생합니다.', openChannels: '현재 개설된 채널', loadingChannels: '채널을 불러오는 중입니다.', startListening: '듣기 시작', stopListening: '듣기 중지', refreshChannels: '채널 새로고침', chooseChannel: '— 통역 채널을 선택하세요 —', noChannels: '현재 개설된 통역 채널이 없습니다.', onAir: '송신 중', waiting: '송신 대기', connectingAudio: '통역 오디오에 연결하는 중입니다.', waitingForAudio: '선택한 채널의 송신을 기다리고 있습니다.', playbackBlocked: '재생이 차단되었습니다. 아래 재생 버튼을 누르세요.', listening: '통역을 듣는 중입니다.', disconnectedRetrying: '연결이 끊겼습니다. 다시 연결하는 중입니다.', checkingPermission: '청취 권한을 확인하는 중입니다.', connectingServer: '통역 서버에 연결하는 중입니다.', startFailed: '청취를 시작하지 못했습니다. {message}', stopped: '청취를 중지했습니다.', loadFailed: '채널을 불러오지 못했습니다. {message}', errorFallback: '요청을 완료하지 못했습니다.',
+      },
+      en: {
+        documentTitle: 'EV211 Interpretation Listener', pageTitle: 'Interpretation Listener', languageToggleLabel: 'Switch to Korean', login: 'Sign in', operatorLogin: 'Operator sign in', operatorPassword: 'Administrator or sender password', openOperator: 'Open operator console', loginNote: 'Listeners can select and hear an interpretation channel below without a password.', selectChannel: 'Select an interpretation channel', selectDescription: 'Select the language channel you want, then press Start listening. Audio plays automatically when broadcasting starts.', openChannels: 'Open channels', loadingChannels: 'Loading channels.', startListening: 'Start listening', stopListening: 'Stop listening', refreshChannels: 'Refresh channels', chooseChannel: '— Select an interpretation channel —', noChannels: 'There are no open interpretation channels.', onAir: 'On air', waiting: 'Waiting for broadcast', connectingAudio: 'Connecting to interpretation audio.', waitingForAudio: 'Waiting for the selected channel to broadcast.', playbackBlocked: 'Playback was blocked. Use the audio player below.', listening: 'Listening to interpretation audio.', disconnectedRetrying: 'Connection lost. Reconnecting.', checkingPermission: 'Checking listening permission.', connectingServer: 'Connecting to the interpretation server.', startFailed: 'Could not start listening. {message}', stopped: 'Listening stopped.', loadFailed: 'Could not load channels. {message}', errorFallback: 'The request could not be completed.',
+      },
+    };
+    let translateDynamic = () => {};
+    const i18n = window.EV211I18n.create(strings, () => translateDynamic());
+    const t = (key, values) => i18n.t(key, values);
+    const errorMessage = (error) => i18n.language === 'en' ? t('errorFallback') : error.message;
     const LK = window.LivekitClient;
     const API = '/api';
     const channelSelect = document.getElementById('channel');
@@ -86,6 +102,9 @@
     let renewalTimer = null;
     let retryTimer = null;
     let retryCount = 0;
+    translateDynamic = () => {
+      if (channels.length) renderChannels();
+    };
 
     function defaultWsUrl() {
       const host = location.hostname;
@@ -119,14 +138,14 @@
       channelSelect.replaceChildren();
       const placeholder = document.createElement('option');
       placeholder.value = '';
-      placeholder.textContent = channels.length ? '— 통역 채널을 선택하세요 —' : '현재 개설된 통역 채널이 없습니다.';
+      placeholder.textContent = channels.length ? t('chooseChannel') : t('noChannels');
       channelSelect.appendChild(placeholder);
 
       channelList.replaceChildren();
       for (const channel of channels) {
         const option = document.createElement('option');
         option.value = String(channel.channel_id);
-        option.textContent = `${channel.label} (${channel.language})${channel.on_air ? ' · 송신 중' : ''}`;
+        option.textContent = `${channel.label} (${channel.language})${channel.on_air ? ` · ${t('onAir')}` : ''}`;
         channelSelect.appendChild(option);
 
         const item = document.createElement('li');
@@ -134,7 +153,7 @@
         name.textContent = `${channel.label} (${channel.language})`;
         const state = document.createElement('span');
         state.className = channel.on_air ? 'onair' : 'waiting';
-        state.textContent = channel.on_air ? '송신 중' : '송신 대기';
+        state.textContent = channel.on_air ? t('onAir') : t('waiting');
         item.append(name, state);
         channelList.appendChild(item);
       }
@@ -148,9 +167,9 @@
         const body = await api('/channels');
         channels = body.channels.filter((channel) => channel.state === 'open');
         renderChannels();
-        if (!room) setStatus(channels.length ? '통역 채널을 선택하세요.' : '현재 개설된 통역 채널이 없습니다.');
+        if (!room) setStatus(channels.length ? t('chooseChannel') : t('noChannels'));
       } catch (error) {
-        setStatus(`채널을 불러오지 못했습니다. ${error.message}`, true);
+        setStatus(t('loadFailed', { message: errorMessage(error) }), true);
       }
     }
 
@@ -193,9 +212,9 @@
       const publication = expectedPublication(targetRoom);
       if (publication) {
         publication.setSubscribed(true);
-        setStatus('통역 오디오에 연결하는 중입니다.');
+        setStatus(t('connectingAudio'));
       } else {
-        setStatus('선택한 채널의 송신을 기다리고 있습니다.');
+        setStatus(t('waitingForAudio'));
       }
     }
 
@@ -204,9 +223,9 @@
       playingTrack = track;
       track.attach(player);
       player.play().catch(() => {
-        setStatus('재생이 차단되었습니다. 아래 재생 버튼을 누르세요.');
+        setStatus(t('playbackBlocked'));
       });
-      setStatus('통역을 듣는 중입니다.');
+      setStatus(t('listening'));
     }
 
     async function sendHeartbeat() {
@@ -223,7 +242,7 @@
       targetRoom.on(LK.RoomEvent.TrackPublished, (publication) => {
         if (room === targetRoom && publication.kind === 'audio' && publication.trackName === grant.track_name) {
           publication.setSubscribed(true);
-          setStatus('통역 오디오에 연결하는 중입니다.');
+          setStatus(t('connectingAudio'));
         }
       });
       targetRoom.on(LK.RoomEvent.TrackSubscribed, (track, publication) => {
@@ -233,7 +252,7 @@
       targetRoom.on(LK.RoomEvent.TrackUnpublished, (publication) => {
         if (room === targetRoom && publication.trackName === grant.track_name) {
           detachAudio();
-          setStatus('선택한 채널의 송신을 기다리고 있습니다.');
+          setStatus(t('waitingForAudio'));
         }
       });
       targetRoom.on(LK.RoomEvent.Disconnected, () => {
@@ -241,7 +260,7 @@
         retryCount += 1;
         room = null;
         detachAudio();
-        setStatus('연결이 끊겼습니다. 다시 연결하는 중입니다.');
+        setStatus(t('disconnectedRetrying'));
         retryTimer = setTimeout(() => connectChannel(selectedChannelId), 1000);
       });
     }
@@ -255,12 +274,12 @@
       refreshButton.disabled = true;
       channelSelect.disabled = true;
       try {
-        setStatus('청취 권한을 확인하는 중입니다.');
+        setStatus(t('checkingPermission'));
         grant = await api(`/channels/${channelId}/subscribe-tokens`, { method: 'POST' });
         const nextRoom = new LK.Room({ autoSubscribe: false, adaptiveStream: false, dynacast: false });
         room = nextRoom;
         bindRoom(nextRoom);
-        setStatus('통역 서버에 연결하는 중입니다.');
+        setStatus(t('connectingServer'));
         await nextRoom.connect(defaultWsUrl(), grant.token, { autoSubscribe: false });
         if (room !== nextRoom) return;
         retryCount = 0;
@@ -272,7 +291,7 @@
         await closeRoom();
         grant = null;
         selectedChannelId = null;
-        setStatus(`청취를 시작하지 못했습니다. ${error.message}`, true);
+        setStatus(t('startFailed', { message: errorMessage(error) }), true);
       } finally {
         refreshButton.disabled = false;
         if (!room) {
@@ -292,7 +311,7 @@
       stopButton.disabled = true;
       channelSelect.disabled = channels.length === 0;
       startButton.disabled = !channelSelect.value;
-      setStatus('청취를 중지했습니다.');
+      setStatus(t('stopped'));
     }
 
     document.getElementById('loginToggle').onclick = () => {
