@@ -551,6 +551,8 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                         await _try_remove(st, lease.identity)
                     st.db.close_channel(channel_id)
                     st.on_air.clear_channel(channel_id)
+                    # 이 AI 채널을 원음으로 구독하던 종속 AI 채널도 cascade 종료(결함4).
+                    await _close_dependent_ai_channels(st, channel_id)
                     return Response(status_code=204)
                 # 사람 채널: fail-open 방지 — RemoveParticipant 성공 후에만 상태 전이.
                 lease = st.db.get_lease(channel_id)
@@ -560,6 +562,9 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                         return _err("livekit_error", "LiveKit 참가자 제거에 실패했습니다. 다시 시도하세요.", 502)
                 st.db.close_channel(channel_id)
                 st.on_air.clear_channel(channel_id)
+                # 이 사람 채널을 원음으로 구독하던 종속 AI 채널을 cascade 종료(결함4) — 슬롯
+                # 재사용 시 구 AI 워커가 새 채널 오디오를 계속 번역하는 것을 막는다.
+                await _close_dependent_ai_channels(st, channel_id)
         return Response(status_code=204)
 
     # ---- subscribe tokens ----
@@ -970,6 +975,10 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                     src = st.db.get_channel(body.source_channel)
                     if src is None or src.state != "open":
                         return _err("invalid_source", "원음 채널이 열린 오디오 채널이 아닙니다.", 409)
+                # 의존성 순환 검사(결함4): 원음이 AI 채널이면 그 원음 체인을 따라가 새 출력
+                # slot 으로 되돌아오면(1↔2 등) 번역 피드백이 되므로 거부한다.
+                if _ai_source_cycle(st, cid, body.source_channel):
+                    return _err("invalid_source", "원음 채널 의존성이 순환합니다.", 409)
                 await st.ensure_room()
                 try:
                     ch = st.db.create_channel(
@@ -978,6 +987,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                         f"AI: {body.target_language}",
                         source="ai",
                         target_language=body.target_language,
+                        source_channel=body.source_channel,
                     )
                 except ChannelExists:
                     # 슬롯 선택과 생성이 한 트랜잭션이 아니라 동시 요청이 같은 최저 슬롯을
@@ -1032,6 +1042,18 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                 cur = st.db.get_channel(cid)
                 if st.ai_channels.get(cid) is channel and cur is not None and cur.source == "ai":
                     await st.ai_channels.stop(cid, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS)
+                    # 결함2: DELETE 경로와 동일하게 잔존 participant·ch-NN 트랙을 bounded
+                    # best-effort 로 제거한다(LiveKit 접속·발행까지 성공했으나 OpenAI 타임아웃/
+                    # room.disconnect 고착 시 남을 수 있음). 실패해도 DB 는 닫고 로그로 기록한다.
+                    lease = st.db.get_lease(cid)
+                    if lease is not None:
+                        try:
+                            await asyncio.wait_for(
+                                _try_remove(st, lease.identity),
+                                timeout=AI_WORKER_STOP_TIMEOUT_SECONDS,
+                            )
+                        except Exception:  # noqa: BLE001 — webhook reconcile 이 후속 정리
+                            log.warning("ai_readiness_rollback_remove_failed ch=%s", cid)
                     st.db.close_channel(cid)
                     st.on_air.clear_channel(cid)
                 else:
@@ -1066,6 +1088,8 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                     await _try_remove(st, lease.identity)
                 st.db.close_channel(channel_id)
                 st.on_air.clear_channel(channel_id)
+                # 이 AI 채널을 원음으로 구독하던 종속 AI 채널도 cascade 종료(결함4).
+                await _close_dependent_ai_channels(st, channel_id)
         return Response(status_code=204)
 
     @app.get("/ai-channels/{channel_id}/status")
@@ -1615,6 +1639,63 @@ def _ai_token_provider(st: AppState, channel_id: int):
         )
 
     return provider
+
+
+def _ai_source_cycle(st: AppState, output_cid: int, source_channel: int) -> bool:
+    """AI 채널 개설 시 원음 의존성 체인이 새 출력 slot 으로 되돌아오는지(순환) 검사한다(결함4).
+
+    source_channel 이 AI 채널이면 그 원음(source_channel)으로 계속 따라가며, 도중에 출력
+    slot(output_cid)을 만나면 순환이다(예: ch1→ch2, ch2→ch1). Floor(ch-00)·사람 채널·
+    닫힘/없음은 체인 종단이다. 기존 데이터에 이미 순환이 있어도 visited 로 무한루프를 막는다.
+    """
+    cur: int | None = source_channel
+    seen: set[int] = set()
+    while cur is not None and cur != FLOOR_CHANNEL_ID:
+        if cur == output_cid:
+            return True
+        if cur in seen:
+            return True
+        seen.add(cur)
+        ch = st.db.get_channel(cur)
+        if ch is None or ch.state != "open" or ch.source != "ai":
+            return False  # 사람/닫힘/없음 = 체인 종단(순환 아님)
+        cur = ch.source_channel
+    return False
+
+
+async def _close_dependent_ai_channels(st: AppState, source_id: int) -> list[int]:
+    """source_id 를 (직·간접) 원음으로 구독하는 열린 AI 채널을 모두 정지·close 한다(결함4 cascade).
+
+    원음 채널이 삭제·종료되면 그것을 구독하던 AI 워커는 슬롯 재사용 시 새 채널 오디오를
+    계속 번역(번역 피드백·비용 폭주)하므로 종속 AI 채널을 함께 종료한다. 종속의 종속(체인)도
+    fixpoint 로 수집해 닫는다. 호출부가 rotation_lock 을 보유한 상태에서 부른다.
+    """
+    to_close: list[int] = []
+    seen: set[int] = set()
+    frontier = {source_id}
+    while frontier:
+        nxt: set[int] = set()
+        for src in frontier:
+            for cid in st.db.list_open_ai_channels_by_source(src):
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                to_close.append(cid)
+                nxt.add(cid)
+        frontier = nxt
+    for cid in to_close:
+        await st.ai_channels.stop(cid, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS)
+        lease = st.db.get_lease(cid)
+        if lease is not None:
+            try:
+                await asyncio.wait_for(
+                    _try_remove(st, lease.identity), timeout=AI_WORKER_STOP_TIMEOUT_SECONDS
+                )
+            except Exception:  # noqa: BLE001 — 실패해도 DB 는 닫고 후속 수거는 webhook reconcile
+                log.warning("ai_cascade_remove_failed ch=%s", cid)
+        st.db.close_channel(cid)
+        st.on_air.clear_channel(cid)
+    return to_close
 
 
 async def _publisher_present(st: AppState, identity: str) -> bool:

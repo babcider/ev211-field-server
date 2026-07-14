@@ -213,7 +213,11 @@ class BlockingWorker:
 
     async def run(self, stop):
         self.started.set()
-        await stop.wait()
+        try:
+            await stop.wait()
+        finally:
+            # 실제 워커처럼 run 의 finally 에서 세션·룸을 정리한다(취소로 실행됨).
+            await self.aclose()
 
     async def aclose(self):
         self.closed = True
@@ -335,6 +339,7 @@ class _FakeRoom:
     def __init__(self):
         self._handlers = {}
         self.local_participant = _FakeLocalParticipant()
+        self.remote_participants = {}  # 접속 시점 기존 발행 트랙 순회 대상(결함3 — 비어 있음)
         self.disconnected = False
         self.connect_token = None
 
@@ -521,5 +526,117 @@ def test_stop_timeout_retains_then_reaps_leaked_task(monkeypatch):
         await asyncio.wait_for(manager.close(), timeout=3)
         assert ch._task.done()
         assert ch not in manager._leaked
+
+    _run(body())
+
+
+# ---- 결함1: stop 은 단일 deadline 만 쓴다(취소 무시 정리에도 2배·무한대기 없음) ----
+def test_stop_uses_single_hard_deadline(monkeypatch):
+    import time as _time
+
+    class IgnoreCancelWorker:
+        session_age_seconds = None
+        last_audio_at = None
+        seq = 0
+        renewal_due = False
+
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.token_provider = None
+            self.ready = None
+
+        async def run(self, stop):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.Event().wait()  # 취소를 삼키고 재대기(하드 타임아웃 함정)
+
+        async def aclose(self):
+            await asyncio.Event().wait()  # 호출되면 고착(새 stop 은 호출하지 않는다)
+
+    async def body():
+        w = IgnoreCancelWorker()
+        channel = AiTranslateChannel(
+            1, "en", worker_factory=lambda: w, backoff_base=0.0, max_backoff=0.0
+        )
+        channel.start()
+        await asyncio.wait_for(w.started.wait(), timeout=2)
+        t0 = _time.monotonic()
+        done = await channel.stop(timeout=0.3)
+        elapsed = _time.monotonic() - t0
+        assert done is False  # deadline 초과 → 미완료
+        # 단일 deadline(≈0.3s) — aclose+task 순차 2배(0.6s+)도, 무한대기도 아니다.
+        assert elapsed < 0.6, elapsed
+        assert not channel._task.done()  # 참조 유지(취소 요청됨)
+        # 마지막 강제 수거.
+        channel._task.cancel()
+        await asyncio.wait({channel._task}, timeout=1)
+
+    _run(body())
+
+
+# ---- 결함3: auto_subscribe=False + 원음(ch-00) 트랙만 선택 구독 ----
+def test_selective_subscribe_only_source_track(monkeypatch):
+    from livekit import rtc
+
+    captured = {}
+    monkeypatch.setattr(rtc, "AudioSource", lambda *a, **k: object())
+    monkeypatch.setattr(
+        rtc.LocalAudioTrack, "create_audio_track", lambda name, source: object()
+    )
+    monkeypatch.setattr(
+        rtc, "RoomOptions", lambda **k: (captured.update(k), object())[1]
+    )
+    monkeypatch.setattr(rtc, "TrackPublishOptions", type("TPO", (), {}))
+    monkeypatch.setattr(rtc, "TrackSource", type("TS", (), {"SOURCE_MICROPHONE": 1}))
+
+    subscribed = []
+
+    class Pub:
+        def __init__(self, name):
+            self.name = name
+            self.kind = rtc.TrackKind.KIND_AUDIO
+
+        def set_subscribed(self, value):
+            subscribed.append(self.name)
+
+    class Part:
+        def __init__(self, pubs):
+            self.track_publications = {p.name: p for p in pubs}
+
+    class LP:
+        async def publish_track(self, track, opts):
+            pass
+
+    class Room:
+        def __init__(self):
+            self._h = {}
+            self.local_participant = LP()
+            # 접속 시점에 이미 원음(ch-00)과 타 채널(ch-05)이 발행돼 있다.
+            self.remote_participants = {"p": Part([Pub("ch-00"), Pub("ch-05")])}
+
+        def on(self, name):
+            def deco(fn):
+                self._h[name] = fn
+                return fn
+
+            return deco
+
+        async def connect(self, url, token, options):
+            pass
+
+    async def body():
+        room = Room()
+        worker = TranslateWorker(
+            _params(), session_factory=lambda: FakeSession(), room_factory=lambda: room
+        )
+        await worker._connect_livekit(asyncio.Queue())
+        assert captured.get("auto_subscribe") is False  # 전체 자동 구독 안 함
+        assert subscribed == ["ch-00"]  # 기존 발행 중 원음만 선택 구독
+        # 이후 track_published 이벤트도 매칭 트랙만 구독한다.
+        room._h["track_published"](Pub("ch-00"), object())
+        room._h["track_published"](Pub("ch-07"), object())
+        assert subscribed == ["ch-00", "ch-00"]  # ch-07 미구독
 
     _run(body())

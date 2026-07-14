@@ -260,7 +260,14 @@ def test_send_password_rotation_closes_ai_channels(ai_client, send_headers):
     client, st = ai_client
     client.post("/ai-channels", json={"target_language": "en"}, headers=send_headers)
     assert st.db.get_channel(1).state == "open"
-    _run(st.change_send_password("rotated-send-9999"))
+    # 송신 비번 회전(세대 회전)을 엔드포인트로 트리거한다 — 슈퍼바이저 task 와 같은
+    # 이벤트루프(TestClient)에서 실행돼야 stop 이 완료를 관찰한다(교차 루프 회피).
+    r = client.put(
+        "/admin/passwords/send",
+        json={"new_password": "rotated-send-9999"},
+        headers={"Authorization": f"Bearer {ADMIN_PW}"},
+    )
+    assert r.status_code == 204
     # 인메모리 워커 정지 + DB 행도 닫혀 슬롯이 반납된다.
     assert st.ai_channels.has(1) is False
     assert st.db.get_channel(1).state == "closed"
@@ -486,3 +493,114 @@ def test_dedicated_ai_delete_passes_bounded_stop_timeout(
     r = client.delete("/ai-channels/1", headers=send_headers)
     assert r.status_code == 204
     assert seen and seen[-1] is not None
+
+
+# ---- 결함2: readiness 타임아웃 롤백이 잔존 participant 를 제거한다 ----
+def test_readiness_rollback_removes_participant(tmp_path, send_headers, monkeypatch):
+    import app.main as main_mod
+
+    settings = dataclasses.replace(make_settings(tmp_path), openai_api_key="sk-test")
+    db = Database(settings.db_path)
+    lk = MockLiveKit()
+    st = AppState(settings, db, lk)
+    _run(st.bootstrap())
+
+    class ParkNoReadyWorker:
+        session_age_seconds = None
+        last_audio_at = None
+        seq = 0
+        renewal_due = False
+        ready = None
+        token_provider = None
+
+        def __init__(self):
+            self.stopped = False
+
+        async def run(self, stop):
+            await stop.wait()  # 준비 신호 없이 파킹 → readiness 타임아웃
+
+        async def aclose(self):
+            self.stopped = True
+
+    st.ai_channels = AiChannelManager(
+        lambda params: ParkNoReadyWorker(), backoff_base=0.0, max_backoff=0.0
+    )
+    monkeypatch.setattr(main_mod, "AI_READY_TIMEOUT_SECONDS", 0.2)
+    removed = []
+    orig_remove = lk.remove_participant
+
+    async def spy(room, identity):
+        removed.append(identity)
+        return await orig_remove(room, identity)
+
+    monkeypatch.setattr(lk, "remove_participant", spy)
+    app = create_app(state=st)
+    try:
+        with TestClient(app, base_url="https://testserver") as client:
+            r = client.post(
+                "/ai-channels", json={"target_language": "en"}, headers=send_headers
+            )
+            assert r.status_code == 503
+            # 롤백이 lease identity 로 잔존 participant 를 제거했다(DELETE 경로와 일관).
+            assert removed and removed[-1].startswith("speaker-ch-01-")
+            assert st.db.get_channel(1).state == "closed"
+    finally:
+        db.close()
+
+
+# ---- 결함4: source_channel 영속 + 순환 검사 + cascade ----
+def test_ai_channel_source_channel_persisted(ai_client, send_headers):
+    client, st = ai_client
+    # Floor(0) 원음 기본값이 영속된다.
+    client.post("/ai-channels", json={"target_language": "en"}, headers=send_headers)
+    assert st.db.get_channel(1).source_channel == 0
+    # 비-Floor 원음도 영속된다.
+    client.post(
+        "/channels",
+        json={"language": "ko", "label": "한국어", "channel_id": 3},
+        headers=send_headers,
+    )
+    client.post(
+        "/ai-channels",
+        json={"target_language": "ja", "source_channel": 3},
+        headers=send_headers,
+    )
+    assert st.db.get_channel(2).source_channel == 3
+
+
+def test_create_ai_channel_rejects_dependency_cycle(ai_client, send_headers):
+    client, st = ai_client
+    # slot 2 에 원음이 slot 1 인 AI 채널을 직접 seed(ch2 → ch1).
+    st.db.create_channel(
+        2, "en", "AI: en", source="ai", target_language="en", source_channel=1
+    )
+    # slot 1 에 원음이 slot 2 인 AI 채널을 만들면 1↔2 순환 → 409.
+    r = client.post(
+        "/ai-channels",
+        json={"target_language": "ja", "source_channel": 2},
+        headers=send_headers,
+    )
+    assert r.status_code == 409
+    assert r.json()["code"] == "invalid_source"
+
+
+def test_delete_source_cascades_dependent_ai_channels(ai_client, send_headers):
+    client, st = ai_client
+    # 사람 원음 ch2 + 그것을 구독하는 AI(cid=1).
+    client.post(
+        "/channels",
+        json={"language": "ko", "label": "한국어", "channel_id": 2},
+        headers=send_headers,
+    )
+    client.post(
+        "/ai-channels",
+        json={"target_language": "en", "source_channel": 2},
+        headers=send_headers,
+    )
+    assert st.ai_channels.has(1) is True
+    assert st.db.get_channel(1).source_channel == 2
+    # 원음(사람 ch2) 삭제 → 종속 AI(ch1)를 cascade 정지·close.
+    r = client.delete("/channels/2", headers=send_headers)
+    assert r.status_code == 204
+    assert st.ai_channels.has(1) is False
+    assert st.db.get_channel(1).state == "closed"

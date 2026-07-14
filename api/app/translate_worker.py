@@ -276,8 +276,16 @@ class TranslateWorker:
         self._source = rtc.AudioSource(AI_INPUT_SAMPLE_RATE, NUM_CHANNELS)
         track = rtc.LocalAudioTrack.create_audio_track(self._params.publish_track, self._source)
 
+        def _wants(publication) -> bool:
+            # 원음(subscribe_track=ch-00) 오디오 트랙만 구독 대상.
+            return (
+                getattr(publication, "kind", None) == rtc.TrackKind.KIND_AUDIO
+                and getattr(publication, "name", None) == self._params.subscribe_track
+            )
+
         @room.on("track_subscribed")
         def _on_sub(track_, publication, _participant) -> None:
+            # 선택 구독한 트랙만 도착하지만 방어적으로 종류·트랙명을 재확인한다.
             if track_.kind != rtc.TrackKind.KIND_AUDIO:
                 return
             # Floor(ch-00)만 구독 대상(자기 자신·타 채널 트랙 무시).
@@ -293,12 +301,25 @@ class TranslateWorker:
             self._streams.append(stream)
             self._pump_tasks.append(asyncio.create_task(self._pump_floor(stream, floor_frames)))
 
+        @room.on("track_published")
+        def _on_published(publication, _participant) -> None:
+            # 결함3: auto_subscribe=False 이므로 원음(ch-00) 트랙만 선택 구독한다 — 워커 N개 ×
+            # 전체 트랙 M개 자동 구독으로 SFU 전송·WebRTC 수신 자원이 폭증하지 않게.
+            if _wants(publication):
+                publication.set_subscribed(True)
+
         token = await self._resolve_token()
+        # auto_subscribe=False 로 접속해 트랙명 필터 전에 전체 원격 트랙을 구독하지 않는다(결함3).
         await room.connect(
             self._params.rtc_url,
             token,
-            rtc.RoomOptions(auto_subscribe=True, dynacast=False),
+            rtc.RoomOptions(auto_subscribe=False, dynacast=False),
         )
+        # 접속 시점에 이미 발행돼 있던 원음 트랙도 선택 구독한다(track_published 를 놓치지 않도록).
+        for participant in room.remote_participants.values():
+            for publication in participant.track_publications.values():
+                if _wants(publication):
+                    publication.set_subscribed(True)
         opts = rtc.TrackPublishOptions()
         opts.source = rtc.TrackSource.SOURCE_MICROPHONE
         await room.local_participant.publish_track(track, opts)
@@ -480,39 +501,28 @@ class AiTranslateChannel:
             backoff = min(self._max_backoff, backoff * 2)
 
     async def stop(self, timeout: float | None = None) -> bool:
-        """정지를 요청하고 감독 task 가 실제로 끝났는지 반환한다(회귀3).
+        """정지를 요청하고 감독 task 가 실제로 끝났는지 반환한다(회귀3·결함1).
 
-        server-first: stop 신호 → 감독 task **강제 취소**(워커 정리가 고착돼도 반드시
-        풀리도록) → 현재 워커 aclose best-effort → 감독 task 종료 대기. task 의 run() finally
-        도 세션·룸을 정리하지만, fake 워커·즉시 종료 대비로 aclose 를 한 번 더 트리거한다.
-        timeout 안에 task 가 끝나면 True, 아니면 False(호출부가 leaked 로 추적·후속 수거).
+        server-first: stop 신호 → 감독 task **강제 취소** → **단일 deadline** 안에서 task 종료를
+        `asyncio.wait` 로 **관찰만** 한다(취소완료를 요청 경로에서 await 하지 않는다). 세션·룸
+        정리는 worker.run() 의 finally(취소로 실행)가 수행한다. deadline 안에 끝나면 True,
+        아니면 False(호출부가 _leaked 로 참조 이관해 별도 수거).
+
+        aclose 가 취소를 삼키고 재대기해도(하드 타임아웃이 아닌 wait_for 함정) stop 이 deadline
+        을 넘겨 블록되지 않게 하고, aclose·task 에 timeout 을 순차 적용해 상한이 2배가 되던
+        문제를 제거한다 — DELETE 가 rotation_lock+channel_lock 을 쥔 채 무한 대기하지 않는다.
         """
         self._stop.set()
         task = self._task
-        worker = self._worker
-        # 감독 task 를 먼저 강제 취소한다 — worker.aclose/room.disconnect 고착에 종료가
-        # 물리지 않게(먼저 pop 하고 나중에 취소하던 순서 문제를 제거).
-        if task is not None:
-            task.cancel()
-        if worker is not None:
-            try:
-                if timeout is None:
-                    await worker.aclose()
-                else:
-                    await asyncio.wait_for(worker.aclose(), timeout)
-            except Exception:  # noqa: BLE001 — 타임아웃 포함 종료는 best-effort
-                log.warning("ai_worker_aclose_failed ch=%s", self.channel_id)
         if task is None:
             return True
-        try:
-            if timeout is None:
-                await task
-            else:
-                # shield 로 감싸 wait_for 가 (이미 취소된) task 를 재취소·재대기하며 고착되지
-                # 않게 하고, 제한시간 초과 시 즉시 빠져나온다(task 는 계속 살아 있음).
-                await asyncio.wait_for(asyncio.shield(task), timeout)
-        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):  # noqa: BLE001
-            pass
+        # 감독 task 를 강제 취소한다 — worker.run 의 finally 가 세션·룸을 정리한다.
+        task.cancel()
+        # asyncio.wait 는 timeout 초과 시 task 를 재취소·재대기하지 않고 즉시 반환한다(하드 상한).
+        if timeout is None:
+            await asyncio.wait({task})
+        else:
+            await asyncio.wait({task}, timeout=timeout)
         return task.done()
 
     def status(self) -> dict:
@@ -628,20 +638,18 @@ class AiChannelManager:
         await self._reap_leaked()
 
     async def _reap_leaked(self) -> None:
-        """stop 타임아웃으로 못 멈춘 감독 task 를 강제 취소·수거한다(회귀3, best-effort)."""
+        """_leaked 로 남은 감독 task 를 강제 취소·수거한다(회귀3·결함1 — 관찰만, 무한대기 방지)."""
         channels = list(self._leaked)
         self._leaked.clear()
-        tasks = [c._task for c in channels if c._task is not None]
+        tasks = {c._task for c in channels if c._task is not None}
         for task in tasks:
             task.cancel()
         if tasks:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=AI_WORKER_STOP_TIMEOUT_SECONDS,
-                )
-            except Exception:  # noqa: BLE001 — 마지막 수거도 무기한 대기하지 않는다
-                log.warning("ai_leaked_task_reap_timeout count=%s", len(tasks))
+            # asyncio.wait 로 관찰만 — 취소를 삼키는 정리에도 무한대기하지 않는다.
+            await asyncio.wait(tasks, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS)
+            still = sum(1 for t in tasks if not t.done())
+            if still:
+                log.warning("ai_leaked_task_reap_timeout count=%s", still)
 
 
 def build_default_ai_worker_factory(

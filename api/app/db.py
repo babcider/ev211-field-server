@@ -25,6 +25,7 @@ class ChannelRow:
     created_at: float
     source: str = "human"  # 'human'(사람 송신) | 'ai'(AI 통역 워커 송신)
     target_language: str | None = None  # AI 채널의 번역 목표 언어(사람 채널은 None)
+    source_channel: int | None = None  # AI 채널이 구독하는 원음 채널 id(사람 채널은 None)
 
 
 @dataclass
@@ -197,6 +198,8 @@ class Database:
         """
         self._add_column_if_missing("channels", "source", "TEXT NOT NULL DEFAULT 'human'")
         self._add_column_if_missing("channels", "target_language", "TEXT")
+        # AI 채널의 원음 채널 의존성 영속(결함4) — 원음 삭제 시 종속 AI 채널 cascade 판정용.
+        self._add_column_if_missing("channels", "source_channel", "INTEGER")
 
     def _add_column_if_missing(self, table: str, column: str, decl: str) -> None:
         """table 에 column 이 없으면 ADD COLUMN 한다(동시 기동 경합에 안전).
@@ -388,6 +391,11 @@ class Database:
             # 마이그레이션으로 추가된 컬럼(구 DB 조회 경로 방어 — 항상 존재하지만 안전하게).
             source=r["source"] if "source" in keys else "human",
             target_language=r["target_language"] if "target_language" in keys else None,
+            source_channel=(
+                r["source_channel"]
+                if "source_channel" in keys and r["source_channel"] is not None
+                else None
+            ),
         )
 
     def count_open_general_channels(self) -> int:
@@ -413,11 +421,13 @@ class Database:
         label: str,
         source: str = "human",
         target_language: str | None = None,
+        source_channel: int | None = None,
     ) -> ChannelRow:
         """채널 슬롯을 개설한다(원자적). 이미 open 이면 IntegrityError(호출부에서 409 처리).
 
         source='ai' + target_language 로 개설하면 서버측 AI 통역 워커가 송신하는
-        채널이 된다(사람 송신은 publish 엔드포인트에서 거부된다).
+        채널이 된다(사람 송신은 publish 엔드포인트에서 거부된다). source_channel 은 AI
+        채널이 구독하는 원음 채널 id 로, 원음 삭제 시 cascade 판정에 쓴다(결함4).
         """
         track = f"ch-{channel_id:02d}"
         now = _now()
@@ -430,13 +440,14 @@ class Database:
             # closed 였던 채널은 다시 open 으로(epoch 유지), 없으면 새로 삽입.
             self._conn.execute(
                 "INSERT INTO channels "
-                "(channel_id, track_name, language, label, state, epoch, created_at, source, target_language) "
-                "VALUES (?, ?, ?, ?, 'open', 1, ?, ?, ?) "
+                "(channel_id, track_name, language, label, state, epoch, created_at, source, "
+                "target_language, source_channel) "
+                "VALUES (?, ?, ?, ?, 'open', 1, ?, ?, ?, ?) "
                 "ON CONFLICT(channel_id) DO UPDATE SET "
                 "language=excluded.language, label=excluded.label, state='open', "
                 "created_at=excluded.created_at, source=excluded.source, "
-                "target_language=excluded.target_language",
-                (channel_id, track, language, label, now, source, target_language),
+                "target_language=excluded.target_language, source_channel=excluded.source_channel",
+                (channel_id, track, language, label, now, source, target_language, source_channel),
             )
         return self.get_channel(channel_id)  # type: ignore[return-value]
 
@@ -465,6 +476,15 @@ class Database:
                     "DELETE FROM leases WHERE channel_id=?", [(i,) for i in ids]
                 )
         return ids
+
+    def list_open_ai_channels_by_source(self, source_channel: int) -> list[int]:
+        """source_channel 을 원음으로 구독하는 열린 AI 채널 id 목록을 반환한다(결함4 cascade, read-only)."""
+        rows = self._query(
+            "SELECT channel_id FROM channels "
+            "WHERE source='ai' AND state='open' AND source_channel=?",
+            (source_channel,),
+        )
+        return [int(r["channel_id"]) for r in rows]
 
     # ---- lease(원자적 점유) ----
     def get_lease(self, channel_id: int) -> LeaseRow | None:
