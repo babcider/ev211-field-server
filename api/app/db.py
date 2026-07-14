@@ -595,6 +595,21 @@ class Database:
             return None
         return int(r["channel_id"])
 
+    def touch_issued_listener(self, listener_id: str, channel_id: int) -> bool:
+        """heartbeat 수신 시 발급 원장 타임스탬프를 갱신한다.
+
+        활발히 heartbeat 하는 청취자는 issued_at 이 계속 갱신되어 TTL 만료·purge
+        대상이 되지 않는다. 이 갱신이 없으면 1시간(ISSUED_LISTENER_TTL_SECONDS)
+        넘게 연속 수신하는 청취자가 발급 원장에서 사라져 heartbeat 가 무시되고
+        청취자 수가 0 으로 집계되는 결함이 생긴다. 채널 불일치·미발급이면 False.
+        """
+        with self._tx():
+            cur = self._conn.execute(
+                "UPDATE issued_listeners SET issued_at=? WHERE listener_id=? AND channel_id=?",
+                (_now(), listener_id, channel_id),
+            )
+            return cur.rowcount > 0
+
     def record_heartbeat(self, listener_id: str, channel_id: int, ttl_seconds: int) -> None:
         with self._tx():
             self._conn.execute(

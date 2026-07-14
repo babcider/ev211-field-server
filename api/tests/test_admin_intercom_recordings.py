@@ -20,7 +20,7 @@ class FakeRecordings:
         self.completed = []
         self.fail_duplicate = False
 
-    async def start(self, kind, channel_id, label, room, track_name=None):
+    async def start(self, kind, channel_id, label, room, track_name=None, language=None):
         if self.fail_duplicate:
             raise RecordingError("이 채널은 이미 녹음 중입니다.")
         item = {
@@ -30,6 +30,7 @@ class FakeRecordings:
             "label": label,
             "room": room,
             "track_name": track_name,
+            "language": language,
             "active": True,
         }
         self.started.append(item)
@@ -51,6 +52,9 @@ class FakeRecordings:
     def download_path(self, recording_id):
         path = self.tmp_path / f"{recording_id}.mp3"
         return path if path.is_file() else None
+
+    def download_filename(self, recording_id):
+        return f"ev211-{recording_id}.mp3"
 
     async def close(self):
         return None
@@ -238,3 +242,65 @@ def test_recording_delete_endpoint(client, admin_headers, state, tmp_path):
     # 없는 녹음은 404.
     r = client.delete(f"/admin/recordings/{rid}", headers=admin_headers)
     assert r.status_code == 404
+
+
+# ---- 파일명 개선 ----
+def test_download_filename_format():
+    info = RecordingInfo(
+        recording_id="a3f0c1d2-1111-4222-8333-444455556666",
+        kind="relay", channel_id=1, label="Korean (한국어)",
+        room="r", started_at="2026-07-14T09:30:00+00:00", language="ko",
+    )
+    assert info.download_filename() == "ch01-ko_20260714_a3f.mp3"
+
+
+def test_download_filename_intercom_and_label_fallback():
+    ic = RecordingInfo(
+        recording_id="bcd00000-0000-4000-8000-000000000000",
+        kind="intercom", channel_id=3, label="Team A",
+        room="r", started_at="2026-07-14T00:00:00+00:00",
+    )
+    assert ic.download_filename() == "ic03-TeamA_20260714_bcd.mp3"
+
+
+def test_recording_manager_download_filename(tmp_path):
+    import json as _json
+    mgr = RecordingManager(str(tmp_path), "ws://localhost", "k", "s")
+    rid = "a3f0c1d2-1111-4222-8333-444455556666"
+    (tmp_path / f"{rid}.mp3").write_bytes(b"x")
+    (tmp_path / f"{rid}.json").write_text(_json.dumps({
+        "recording_id": rid, "kind": "relay", "channel_id": 2,
+        "label": "Japanese (日本語)", "room": "r",
+        "started_at": "2026-07-14T09:00:00+00:00", "language": "ja",
+    }), encoding="utf-8")
+    assert mgr.download_filename(rid) == "ch02-ja_20260714_a3f.mp3"
+
+
+# ---- 일괄 삭제 ----
+def test_recording_batch_delete(client, admin_headers, state, tmp_path):
+    import json as _json
+    mgr = RecordingManager(str(tmp_path), "ws://localhost", "k", "s")
+    state.recordings = mgr
+    ids = []
+    for _ in range(3):
+        rid = str(uuid.uuid4())
+        (tmp_path / f"{rid}.mp3").write_bytes(b"x")
+        (tmp_path / f"{rid}.json").write_text(_json.dumps({
+            "recording_id": rid, "kind": "relay", "channel_id": 1,
+            "label": "ko", "room": "r", "started_at": "2026-07-14T00:00:00+00:00",
+        }), encoding="utf-8")
+        ids.append(rid)
+    missing = str(uuid.uuid4())
+
+    # 무인증 거부.
+    assert client.post("/admin/recordings/delete", json={"recording_ids": ids}).status_code in (401, 403)
+
+    r = client.post("/admin/recordings/delete",
+                    json={"recording_ids": ids[:2] + [missing]}, headers=admin_headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted_count"] == 2
+    assert set(body["deleted"]) == set(ids[:2])
+    assert missing in body["skipped"]
+    assert not (tmp_path / f"{ids[0]}.mp3").exists()
+    assert (tmp_path / f"{ids[2]}.mp3").exists()  # 미선택은 보존
