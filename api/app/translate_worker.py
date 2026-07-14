@@ -638,7 +638,11 @@ class AiChannelManager:
         await self._reap_leaked()
 
     async def _reap_leaked(self) -> None:
-        """_leaked 로 남은 감독 task 를 강제 취소·수거한다(회귀3·결함1 — 관찰만, 무한대기 방지)."""
+        """_leaked 로 남은 감독 task 를 강제 취소·수거한다(회귀3·결함1·A — 관찰만, 무한대기 방지).
+
+        deadline 후에도 여전히 살아 있는(취소를 삼키는) task 는 다시 _leaked 로 되돌려 추적을
+        유지한다 — 다음 close·최종 종료에서 재수거되게. done 은 반드시 제거해 무한 성장을 막는다.
+        """
         channels = list(self._leaked)
         self._leaked.clear()
         tasks = {c._task for c in channels if c._task is not None}
@@ -647,9 +651,12 @@ class AiChannelManager:
         if tasks:
             # asyncio.wait 로 관찰만 — 취소를 삼키는 정리에도 무한대기하지 않는다.
             await asyncio.wait(tasks, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS)
-            still = sum(1 for t in tasks if not t.done())
-            if still:
-                log.warning("ai_leaked_task_reap_timeout count=%s", still)
+        # 아직 안 끝난 채널은 추적을 유지(재수거 대상), 끝난 것만 버린다.
+        still = [c for c in channels if c._task is not None and not c._task.done()]
+        for c in still:
+            self._leaked.add(c)
+        if still:
+            log.warning("ai_leaked_task_reap_timeout count=%s", len(still))
 
 
 def build_default_ai_worker_factory(

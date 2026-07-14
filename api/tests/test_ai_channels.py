@@ -8,9 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import Database
-from app.main import create_app
+from app.main import _close_dependent_ai_channels, create_app
 from app.state import AppState
-from app.translate_worker import AiChannelManager
+from app.translate_worker import AiChannelManager, AiWorkerParams
 from tests.conftest import ADMIN_PW, MockLiveKit, make_settings
 
 
@@ -604,3 +604,97 @@ def test_delete_source_cascades_dependent_ai_channels(ai_client, send_headers):
     assert r.status_code == 204
     assert st.ai_channels.has(1) is False
     assert st.db.get_channel(1).state == "closed"
+
+
+# ---- 결함4·B: readiness 롤백도 종속 AI 채널을 cascade 종료 ----
+def test_readiness_rollback_cascades_dependents(tmp_path, send_headers, monkeypatch):
+    import app.main as main_mod
+
+    settings = dataclasses.replace(make_settings(tmp_path), openai_api_key="sk-test")
+    db = Database(settings.db_path)
+    lk = MockLiveKit()
+    st = AppState(settings, db, lk)
+    _run(st.bootstrap())
+
+    class ParkWorker:
+        session_age_seconds = None
+        last_audio_at = None
+        seq = 0
+        renewal_due = False
+        ready = None
+        token_provider = None
+
+        def __init__(self):
+            self.stopped = False
+
+        async def run(self, stop):
+            await stop.wait()  # 준비 신호 없이 파킹
+
+        async def aclose(self):
+            self.stopped = True
+
+    seeded = {"done": False}
+
+    def factory(params):
+        # A(cid=1) 워커가 뜨는 순간, 그것(ch-01)을 원음으로 하는 종속 AI B(cid=2)를
+        # seed·start 한다 — A 준비 대기 중 B 가 개설된 상황을 흉내.
+        if params.channel_id == 1 and not seeded["done"]:
+            seeded["done"] = True
+            st.db.create_channel(
+                2, "en", "AI: en", source="ai", target_language="en", source_channel=1
+            )
+            st.ai_channels.start(
+                AiWorkerParams(
+                    channel_id=2,
+                    target_language="en",
+                    rtc_url="",
+                    token="",
+                    room="",
+                    publish_track="ch-02",
+                    subscribe_track="ch-01",
+                )
+            )
+        return ParkWorker()
+
+    st.ai_channels = AiChannelManager(factory, backoff_base=0.0, max_backoff=0.0)
+    monkeypatch.setattr(main_mod, "AI_READY_TIMEOUT_SECONDS", 0.2)
+    app = create_app(state=st)
+    try:
+        with TestClient(app, base_url="https://testserver") as client:
+            r = client.post(
+                "/ai-channels", json={"target_language": "en"}, headers=send_headers
+            )
+            assert r.status_code == 503  # A(1) readiness 타임아웃
+            # A(1) 롤백 + 종속 B(2) cascade 종료.
+            assert st.db.get_channel(1).state == "closed"
+            assert st.db.get_channel(2).state == "closed"
+            assert st.ai_channels.has(2) is False
+    finally:
+        db.close()
+
+
+# ---- 결함4·C: cascade 가 list~lock 사이 재사용된 슬롯은 닫지 않는다 ----
+def test_cascade_skips_reused_slot(ai_client, send_headers, monkeypatch):
+    client, st = ai_client
+    # 사람 원음 ch3 + 그것을 구독하는 AI(cid=1).
+    client.post(
+        "/channels",
+        json={"language": "ko", "label": "한국어", "channel_id": 3},
+        headers=send_headers,
+    )
+    client.post(
+        "/ai-channels",
+        json={"target_language": "en", "source_channel": 3},
+        headers=send_headers,
+    )
+    # cid=1 슬롯을 재사용해 사람 채널로 교체(재사용 흉내).
+    st.db.close_channel(1)
+    st.db.create_channel(1, "ja", "human-reused")  # source='human', source_channel=None
+    # list 는 여전히 stale 하게 cid=1 을 종속으로 돌려주지만(list~lock 레이스), 잠금 안
+    # 재조회에서 source!='ai' 이므로 닫지 않아야 한다.
+    monkeypatch.setattr(
+        st.db, "list_open_ai_channels_by_source", lambda src: [1] if src == 3 else []
+    )
+    closed = _run(_close_dependent_ai_channels(st, 3))
+    assert closed == []  # 재사용된 사람 채널을 닫지 않았다
+    assert st.db.get_channel(1).state == "open"  # 그대로 열림

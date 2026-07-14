@@ -640,3 +640,55 @@ def test_selective_subscribe_only_source_track(monkeypatch):
         assert subscribed == ["ch-00", "ch-00"]  # ch-07 미구독
 
     _run(body())
+
+
+# ---- 결함1·A: reap 후에도 살아있는 task 는 _leaked 로 다시 추적된다 ----
+def test_reap_reretains_still_alive_task(monkeypatch):
+    import app.translate_worker as tw
+
+    monkeypatch.setattr(tw, "AI_WORKER_STOP_TIMEOUT_SECONDS", 0.15)
+
+    class ReluctantWorker:
+        session_age_seconds = None
+        last_audio_at = None
+        seq = 0
+        renewal_due = False
+
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.cancels = 0
+            self.token_provider = None
+            self.ready = None
+
+        async def run(self, stop):
+            self.started.set()
+            while True:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancels += 1
+                    if self.cancels >= 3:
+                        raise  # 3번째 취소에만 종료(그 전엔 취소를 삼키고 재대기)
+
+        async def aclose(self):
+            pass
+
+    async def body():
+        w = ReluctantWorker()
+        manager = AiChannelManager(
+            worker_factory=lambda params: w, backoff_base=0.0, max_backoff=0.0
+        )
+        ch = manager.start(_params(9))
+        await asyncio.wait_for(w.started.wait(), timeout=2)
+        # stop 타임아웃(1번째 취소 삼킴) → 활성 레지스트리에서 빠지고 _leaked 로 추적.
+        assert await asyncio.wait_for(manager.stop(9, timeout=0.15), timeout=2) is True
+        assert ch in manager._leaked and not ch._task.done()
+        # reap(2번째 취소 삼킴) 후에도 살아있으면 다시 _leaked 로 추적 유지(결함1·A 핵심).
+        await asyncio.wait_for(manager._reap_leaked(), timeout=2)
+        assert ch in manager._leaked and not ch._task.done()  # after_reap: 여전히 추적됨
+        # 마지막 reap(3번째 취소)에 종료·추적 제거(무한 성장 방지).
+        await asyncio.wait_for(manager._reap_leaked(), timeout=2)
+        assert ch._task.done()
+        assert ch not in manager._leaked
+
+    _run(body())
