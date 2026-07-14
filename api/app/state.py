@@ -25,6 +25,7 @@ from .monitor import OnAirTracker
 from .rate_limit import Blocklist, FailureLock, RateLimiter
 from .recording import RecordingManager
 from .tokens import intercom_channel_room_name, intercom_room_name, room_name
+from .translate_worker import AiChannelManager, build_default_ai_worker_factory
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +83,10 @@ class AppState:
         #   실행 수를 제한해 다IP 동시 요청의 CPU/메모리 폭주를 막는다(23차 신규).
         self._intercom_pw_key_locks: dict[str, asyncio.Lock] = {}
         self.intercom_scrypt_sem = asyncio.Semaphore(2)
+
+        # 모드 C AI 통역 채널 슈퍼바이저 레지스트리. 운영 기본 워커 팩토리(실 OpenAI WS +
+        # rtc.Room)를 주입한다. 테스트는 이 속성을 fake 워커 팩토리 매니저로 교체한다.
+        self.ai_channels = AiChannelManager(build_default_ai_worker_factory(settings))
 
     def intercom_pw_key_lock(self, key: str) -> asyncio.Lock:
         """채널 비번 시도(IP:channel_id) 키별 직렬화 락(없으면 생성)."""
@@ -282,6 +287,14 @@ class AppState:
         self.generation = new_gen
         self.blocklist.clear()
         self.on_air.clear()
+        # 세대 회전으로 구세대 룸·토큰이 폐기되므로 AI 통역 워커도 전부 정지한다
+        # (구세대 토큰으로는 새 룸에 접속할 수 없어 무한 재시작하게 되기 때문).
+        await self.ai_channels.close()
+        # 인메모리 워커를 정지해도 open AI 채널 행은 DB 에 남아 슬롯을 점유하므로 함께
+        # 닫는다(HIGH2). rotate_send_password 가 이미 전체 lease 를 폐기했다.
+        closed_ai = self.db.close_open_ai_channels()
+        if closed_ai:
+            log.info("closed_orphan_ai_channels_on_rotation channels=%s", closed_ai)
 
     async def bootstrap(self) -> None:
         """기동 시퀀스: 세대 결정 → 새 세대 룸 생성 → 구세대 룸 삭제 → reconcile."""
@@ -302,6 +315,13 @@ class AppState:
         # 세대 변경 시 구세대 lease 를 전부 정리한다(구세대 토큰은 어차피 무효).
         if generation_changed:
             self.db.clear_all_leases()
+
+        # 재시작 시 인메모리 워커 레지스트리는 비어 있으므로, 이전 프로세스가 남긴 open AI
+        # 채널 행은 워커 없는 고아다 — 슬롯을 영구 점유하지 않도록 원자적으로 닫는다(HIGH2).
+        # (자동 재스폰 복원은 후속.)
+        closed_ai = self.db.close_open_ai_channels()
+        if closed_ai:
+            log.info("closed_orphan_ai_channels_on_bootstrap channels=%s", closed_ai)
 
         # 세대 변경 시 메모리 차단 목록·on-air 초기화(계약).
         self.blocklist.clear()

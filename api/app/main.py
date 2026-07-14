@@ -13,6 +13,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .config import (
+    AI_READY_TIMEOUT_SECONDS,
+    AI_SUPPORTED_OUTPUT_LANGUAGES,
+    AI_WORKER_STOP_TIMEOUT_SECONDS,
     FLOOR_CHANNEL_ID,
     INTERCOM_MAX_CHANNELS,
     INTERCOM_MAX_PARTICIPANTS,
@@ -36,8 +39,10 @@ from .tokens import (
     issue_subscribe_token,
     monitor_response,
     publish_response,
+    room_name,
     subscribe_response,
 )
+from .translate_worker import AiWorkerParams
 from .webhook import WebhookProcessor
 
 _BCP47 = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
@@ -64,6 +69,21 @@ class ChannelCreateBody(BaseModel):
 
 class PublishTokenBody(BaseModel):
     channel_id: int = Field(ge=0, le=15)
+
+
+class AiChannelCreateBody(BaseModel):
+    """AI 통역 채널 개설 요청. target_language=번역 목표 언어, source_channel=원음 채널."""
+
+    target_language: str
+    source_channel: int = Field(default=FLOOR_CHANNEL_ID, ge=0, le=15)
+
+    @field_validator("target_language")
+    @classmethod
+    def _lang(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in AI_SUPPORTED_OUTPUT_LANGUAGES:
+            raise ValueError("지원하지 않는 번역 목표 언어입니다.")
+        return v
 
 
 def _clean_display(v: str) -> str:
@@ -216,10 +236,20 @@ def create_app(state: AppState | None = None) -> FastAPI:
             cleanup_task.cancel()
             with suppress(asyncio.CancelledError):
                 await cleanup_task
-            await app.state.field.recordings.close()
-            # lifespan 이 생성한 DB 연결만 닫는다(테스트 주입 state 는 픽스처가 관리).
-            if owns_db:
-                app.state.field.db.close()
+            # AI 워커 정지가 한 워커의 지연에 물려 녹음·DB 정리까지 막지 않도록,
+            # 정지는 (내부적으로 병렬+타임아웃인) close 에 맡기고 예외를 흡수하며,
+            # 녹음·DB 정리는 중첩 finally 로 반드시 수행한다(MED7).
+            try:
+                await app.state.field.ai_channels.close()
+            except Exception:
+                log.exception("ai_channels_close_failed")
+            finally:
+                try:
+                    await app.state.field.recordings.close()
+                finally:
+                    # lifespan 이 생성한 DB 연결만 닫는다(테스트 주입 state 는 픽스처가 관리).
+                    if owns_db:
+                        app.state.field.db.close()
 
     app = FastAPI(title="EV211 field-api", version="0.1.0", lifespan=lifespan)
 
@@ -379,6 +409,8 @@ def _channel_view(st: AppState, ch) -> dict:
         "state": ch.state,
         "on_air": st.on_air.is_on_air(ch.channel_id),
         "listeners": listeners,
+        "source": ch.source,
+        "target_language": ch.target_language,
     }
 
 
@@ -505,7 +537,22 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                 ch = st.db.get_channel(channel_id)
                 if ch is None or ch.state != "open":
                     return _err("not_found", "채널을 찾을 수 없습니다.", 404)
-                # fail-open 방지: RemoveParticipant 성공 후에만 상태 전이(lease 해제·종료 표시).
+                # AI 채널이면 전용 DELETE(/ai-channels)와 **동일 정책**으로 처리한다(회귀2):
+                # 슈퍼바이저·OpenAI WS·감독 태스크를 먼저 정지(HIGH3)하고, LiveKit 참가자
+                # 제거는 best-effort(실패해도 webhook reconcile 이 정리), DB 행은 **항상 close**.
+                # 사람 채널처럼 502 로 되돌려 open 고아 채널을 남기지 않는다(두 경로 일관).
+                if ch.source == "ai":
+                    # bounded stop — aclose 고착 시 요청이 무한 대기하지 않고 _leaked 로 수거된다.
+                    await st.ai_channels.stop(
+                        channel_id, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS
+                    )
+                    lease = st.db.get_lease(channel_id)
+                    if lease is not None:
+                        await _try_remove(st, lease.identity)
+                    st.db.close_channel(channel_id)
+                    st.on_air.clear_channel(channel_id)
+                    return Response(status_code=204)
+                # 사람 채널: fail-open 방지 — RemoveParticipant 성공 후에만 상태 전이.
                 lease = st.db.get_lease(channel_id)
                 if lease is not None:
                     removed = await _try_remove(st, lease.identity)
@@ -610,6 +657,9 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                 ch = st.db.get_channel(body.channel_id)
                 if ch is None or ch.state != "open":
                     return _err("not_found", "채널을 찾을 수 없습니다.", 404)
+                # AI 통역 채널은 서버 워커가 전담 송신한다 — 사람 송신 발급을 거부한다.
+                if ch.source == "ai":
+                    return _err("channel_busy", "AI 통역 채널은 사람이 송신할 수 없습니다.", 409)
 
                 # 룸이 사라졌으면 재생성(모든 토큰 발급 경로에서 룸 존재 보장).
                 await st.ensure_room()
@@ -873,6 +923,167 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                 room=room, channel_id=channel_id,
             )
 
+    # ---- AI 통역 채널(모드 C) ----
+    def _ai_channel_view(st: AppState, channel_id: int) -> dict:
+        ch = st.db.get_channel(channel_id)
+        return {
+            "channel_id": channel_id,
+            "target_language": ch.target_language if ch else None,
+            "source": ch.source if ch else None,
+            "state": ch.state if ch else None,
+            "track_name": f"ch-{channel_id:02d}",
+            "room": st.room,
+            "worker": st.ai_channels.status(channel_id),
+        }
+
+    @app.post("/ai-channels", status_code=201)
+    async def create_ai_channel(
+        request: Request,
+        body: AiChannelCreateBody = Body(...),
+        authorization: str | None = Header(default=None),
+    ):
+        """AI 통역 채널을 개설한다 — 채널 슬롯 확보 + lease 발급 + 번역 워커 스폰.
+
+        워커는 원음 채널(source_channel, 기본 Floor ch-00)을 구독해 목표 언어로 번역한
+        오디오를 자신의 ch-NN 으로 발행한다. 사람 송신과 달리 lease 소유자가 서버 워커라,
+        webhook 강제(speaker identity·트랙명·lease 검증)를 그대로 통과한다.
+        """
+        st = _st(request)
+        denied = _intercom_auth(request, authorization)
+        if denied is not None:
+            return denied
+        if not st.settings.openai_api_key:
+            return _err("ai_unavailable", "OpenAI 키가 설정되지 않아 AI 통역을 사용할 수 없습니다.", 503)
+        ip = _ip(request, st)
+        async with st.rotation_lock:
+            if not _auth_bearer(authorization, st.send_password):
+                return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
+            cid = st.db.lowest_free_general_slot(st.settings.max_channels)
+            if cid is None:
+                return _err("max_channels_reached", f"최대 채널 수({st.settings.max_channels})에 도달했습니다.", 409)
+            async with st.channel_lock(cid):
+                # 원음 채널 검증(MED9): 자기 트랙 구독 금지 + 닫힌 원음 채널 구독 금지.
+                # Floor(ch-00)는 항상 존재하는 원음이라 존재·상태 검사에서 예외로 둔다.
+                if body.source_channel == cid:
+                    return _err("invalid_source", "원음 채널과 출력 채널이 같을 수 없습니다.", 409)
+                if body.source_channel != FLOOR_CHANNEL_ID:
+                    src = st.db.get_channel(body.source_channel)
+                    if src is None or src.state != "open":
+                        return _err("invalid_source", "원음 채널이 열린 오디오 채널이 아닙니다.", 409)
+                await st.ensure_room()
+                try:
+                    ch = st.db.create_channel(
+                        cid,
+                        body.target_language,
+                        f"AI: {body.target_language}",
+                        source="ai",
+                        target_language=body.target_language,
+                    )
+                except ChannelExists:
+                    # 슬롯 선택과 생성이 한 트랜잭션이 아니라 동시 요청이 같은 최저 슬롯을
+                    # 잡는 경쟁 — 500 대신 409 로 변환한다(MED11).
+                    return _err("max_channels_reached", "채널 슬롯 경합이 발생했습니다. 다시 시도하세요.", 409)
+                nonce = new_nonce()
+                acquired, identity = st.db.acquire_lease(
+                    cid, ch.epoch, st.generation, nonce, PUBLISH_TTL_SECONDS, LEASE_JOIN_GRACE_SECONDS
+                )
+                if not acquired:
+                    # 방금 개설한 슬롯을 잡지 못하는 경쟁은 이례적 — 채널을 닫아 롤백한다.
+                    st.db.close_channel(cid)
+                    return _err("channel_busy", "채널 점유에 실패했습니다. 다시 시도하세요.", 409)
+                token = issue_publish_token(
+                    st.settings.livekit_api_key, st.settings.livekit_api_secret, st.generation, identity
+                )
+                params = AiWorkerParams(
+                    channel_id=cid,
+                    target_language=body.target_language,
+                    rtc_url=st.settings.livekit_rtc_url,
+                    token=token,
+                    room=room_name(st.generation),
+                    publish_track=f"ch-{cid:02d}",
+                    subscribe_track=f"ch-{body.source_channel:02d}",
+                )
+                # 매 (재)접속 시 fresh publish 토큰(+lease 재획득)을 주는 프로바이더 주입(HIGH1).
+                channel = st.ai_channels.start(params, token_provider=_ai_token_provider(st, cid))
+                st.record_signal_event(
+                    direction="send",
+                    event_type="ai_channel_created",
+                    scope="relay",
+                    channel_id=cid,
+                    room=st.room,
+                    subject=identity,
+                    client_ip=ip,
+                )
+                view = _ai_channel_view(st, cid)
+                view["identity"] = identity
+                view["source_channel"] = body.source_channel
+                view["generation"] = st.generation
+
+        # 락 밖에서 최초 접속 준비를 기다린다(전체 서버를 막지 않기 위해) — 제한시간 내
+        # 실제 접속(LiveKit+OpenAI)이 확인되지 않으면 워커·lease·채널을 롤백하고 503(MED8).
+        try:
+            await asyncio.wait_for(channel.ready.wait(), timeout=AI_READY_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            async with st.channel_lock(cid):
+                # 회귀1: 대기 중 이 슬롯이 삭제→재개설(사람 채널 등)로 재사용됐으면 엉뚱한
+                # 채널을 닫으면 안 된다. '내가 시작한 바로 그 슈퍼바이저 채널'이 여전히 이
+                # 슬롯의 등록 채널이고 DB 행도 여전히 AI 채널일 때만 롤백한다. 슬롯 재사용은
+                # 반드시 DELETE(레지스트리 pop)를 거치므로 객체 동일성으로 안전하게 판정된다.
+                cur = st.db.get_channel(cid)
+                if st.ai_channels.get(cid) is channel and cur is not None and cur.source == "ai":
+                    await st.ai_channels.stop(cid, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS)
+                    st.db.close_channel(cid)
+                    st.on_air.clear_channel(cid)
+                else:
+                    log.info("ai_readiness_rollback_skipped_slot_reused ch=%s", cid)
+            return _err("ai_unavailable", "AI 통역 워커가 제한시간 내 연결에 실패했습니다.", 503)
+        return view
+
+    @app.delete("/ai-channels/{channel_id}", status_code=204)
+    async def delete_ai_channel(
+        request: Request,
+        channel_id: int = Path(ge=0, le=15),
+        authorization: str | None = Header(default=None),
+    ):
+        """AI 통역 채널을 종료한다 — 워커 정지(server-first) 후 채널을 닫는다."""
+        st = _st(request)
+        denied = _intercom_auth(request, authorization)
+        if denied is not None:
+            return denied
+        async with st.rotation_lock:
+            if not _auth_bearer(authorization, st.send_password):
+                return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
+            async with st.channel_lock(channel_id):
+                ch = st.db.get_channel(channel_id)
+                if ch is None or ch.state != "open" or ch.source != "ai":
+                    return _err("not_found", "AI 통역 채널을 찾을 수 없습니다.", 404)
+                # server-first: 워커를 먼저 정지(자기 participant 를 disconnect)한 뒤 상태를 닫는다.
+                # bounded stop — aclose 고착 시 무한 대기 없이 _leaked 로 수거된다.
+                await st.ai_channels.stop(channel_id, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS)
+                lease = st.db.get_lease(channel_id)
+                if lease is not None:
+                    # 워커가 이미 나갔으면 not-found → 성공 취급. 잔여 participant 만 정리(best-effort).
+                    await _try_remove(st, lease.identity)
+                st.db.close_channel(channel_id)
+                st.on_air.clear_channel(channel_id)
+        return Response(status_code=204)
+
+    @app.get("/ai-channels/{channel_id}/status")
+    async def get_ai_channel_status(
+        request: Request,
+        channel_id: int = Path(ge=0, le=15),
+        authorization: str | None = Header(default=None),
+    ):
+        """AI 통역 채널의 워커 헬스(실행 여부·재시작 수·세션 나이·마지막 오디오 시각)를 반환한다."""
+        st = _st(request)
+        denied = _intercom_auth(request, authorization)
+        if denied is not None:
+            return denied
+        ch = st.db.get_channel(channel_id)
+        if ch is None or ch.source != "ai":
+            return _err("not_found", "AI 통역 채널을 찾을 수 없습니다.", 404)
+        return _ai_channel_view(st, channel_id)
+
     # ---- status ----
     @app.get("/status")
     async def get_status(request: Request):
@@ -995,6 +1206,11 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                 ch = st.db.get_channel(channel_id)
                 if ch is None or ch.state != "open":
                     return _err("not_found", "채널을 찾을 수 없습니다.", 404)
+                # AI 통역 채널은 서버 워커가 lease 소유자다 — 사람 takeover 로 lease 를
+                # 덮어쓰면 워커 lease 와 사람 lease 가 경합한다. 인수를 거부한다(HIGH4).
+                # (의도적 human 전환 경로는 이번 범위 밖.)
+                if ch.source == "ai":
+                    return _err("channel_busy", "AI 통역 채널은 관리자 인수 대상이 아닙니다. 먼저 AI 채널을 종료하세요.", 409)
 
                 # 룸 존재 보장(모든 토큰 발급 경로).
                 await st.ensure_room()
@@ -1374,6 +1590,31 @@ def _channel_full(st: AppState, ch) -> dict:
     view = _channel_view(st, ch)
     view["created_at"] = _dt.datetime.fromtimestamp(ch.created_at, tz=_dt.timezone.utc).isoformat()
     return view
+
+
+def _ai_token_provider(st: AppState, channel_id: int):
+    """AI 워커가 매 (재)접속 시 호출하는 fresh publish 토큰 프로바이더(HIGH1).
+
+    채널 슬롯 기준으로 lease 를 재획득(force)하고 새 identity 로 publish 토큰을 발급한다.
+    슈퍼바이저가 재시작할 때마다 새 JWT·lease 를 받으므로 '최초 1시간 토큰 재사용 →
+    1시간 뒤 영구 재접속 거절' 결함이 사라진다. 워커가 join 하기 전에 lease.identity 가
+    먼저 갱신되므로 webhook 강제(identity 일치)도 통과한다. 채널이 닫혔으면 예외를 던져
+    슈퍼바이저 루프가 (stop 신호와 함께) 자연 종료하게 한다.
+    """
+
+    async def provider() -> str:
+        ch = st.db.get_channel(channel_id)
+        if ch is None or ch.state != "open" or ch.source != "ai":
+            raise RuntimeError(f"ai channel {channel_id} not open")
+        nonce = new_nonce()
+        identity = st.db.force_acquire_lease(
+            channel_id, ch.epoch, st.generation, nonce, PUBLISH_TTL_SECONDS
+        )
+        return issue_publish_token(
+            st.settings.livekit_api_key, st.settings.livekit_api_secret, st.generation, identity
+        )
+
+    return provider
 
 
 async def _publisher_present(st: AppState, identity: str) -> bool:

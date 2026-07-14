@@ -20,6 +20,23 @@ ROOM_EMPTY_TIMEOUT_SECONDS = 86400  # 룸 empty_timeout — 빈 룸이 삭제되
 SIGNAL_LOG_RETENTION_SECONDS = 30 * 24 * 60 * 60  # 송수신 세션 이벤트 보관 기간 30일
 SIGNAL_LOG_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60  # 만료 이벤트 정리 주기 1일
 
+# ---- 모드 C AI 통역(gpt-realtime-translate) ----
+AI_TRANSLATE_MODEL = "gpt-realtime-translate"  # OpenAI 번역 전용 realtime 모델 id
+AI_TRANSLATE_INPUT_MODEL = "gpt-realtime-whisper"  # 세션 내부 입력 전사 모델
+AI_TRANSLATE_URL = "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate"
+AI_INPUT_SAMPLE_RATE = 24_000  # OpenAI 입출력 PCM16 mono 표본율(24kHz 고정)
+AI_FLOOR_SAMPLE_RATE = 48_000  # LiveKit Floor(ch-00) 원음 표본율
+# 세션 60분 한계 대비 T-5분 make-before-break 예정 지점(구조만 마련, 실 구현은 후속).
+AI_SESSION_RENEW_SECONDS = 55 * 60
+AI_WORKER_BACKOFF_BASE_SECONDS = 1.0  # 워커 크래시 재시작 백오프 초기값
+AI_WORKER_BACKOFF_MAX_SECONDS = 30.0  # 백오프 상한
+AI_WORKER_STOP_TIMEOUT_SECONDS = 5.0  # 워커 stop 1건당 상한(한 워커 지연이 전체 종료를 막지 않게)
+AI_READY_TIMEOUT_SECONDS = 8.0  # AI 채널 개설 시 워커 최초 접속 준비 대기 상한(초과 시 503 롤백)
+# gpt-realtime-translate 가 출력 가능한 언어 13종(소문자 ISO). 입력은 70+ 언어.
+AI_SUPPORTED_OUTPUT_LANGUAGES = frozenset(
+    {"es", "pt", "fr", "ja", "ru", "zh", "de", "ko", "hi", "id", "vi", "it", "en"}
+)
+
 # 기본값(변경 강제 대상). .env.example 의 자리표시자를 기동 시 거부한다.
 _DEFAULT_PASSWORDS = {"change-me", "changeme", "", "password", "default"}
 
@@ -52,6 +69,9 @@ class Settings:
     recordings_path: str
     max_channels: int
     forwarded_allow_ips: str  # 신뢰 프록시 IP/CIDR(콤마 구분). X-Forwarded-* 신뢰 판정용.
+    # 모드 C AI 통역 워커가 gpt-realtime-translate WS 에 붙을 때 쓰는 키(선택).
+    # 미설정이면 AI 채널 생성만 거부되고 나머지 기능은 정상 동작한다.
+    openai_api_key: str = ""
 
 
 class ConfigError(RuntimeError):
@@ -95,6 +115,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     db_path = (e.get("FIELD_DB_PATH") or "/data/field.db").strip()
     recordings_path = (e.get("FIELD_RECORDINGS_PATH") or "/data/recordings").strip()
 
+    # AI 통역 워커용 OpenAI 키(선택). 없으면 AI 채널 생성 요청만 503 으로 거부한다.
+    openai_api_key = (e.get("OPENAI_API_KEY") or "").strip()
+
     # 신뢰하는 프록시(Caddy) IP/CIDR 목록. X-Forwarded-For/Proto 는 이 출처에서 온 요청에만 신뢰한다.
     # 도커 기본 브리지 서브넷을 폭넓게 신뢰(내부망 단일 노드 배포 전제).
     forwarded_allow = (
@@ -121,4 +144,5 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         recordings_path=recordings_path,
         max_channels=max_channels,
         forwarded_allow_ips=forwarded_allow,
+        openai_api_key=openai_api_key,
     )

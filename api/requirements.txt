@@ -5,3 +5,6 @@ uvicorn[standard]==0.34.0
 livekit-api==1.1.1
 livekit==1.1.13
 pydantic==2.10.4
+# 모드 C AI 통역 워커가 gpt-realtime-translate WebSocket 에 직결할 때 사용(직접 의존).
+# livekit 이 이미 동일 버전을 끌어오므로 requirements.lock 과 정합한다.
+websockets==16.1
