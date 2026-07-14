@@ -19,6 +19,12 @@
 - ch-00 = Floor(원음), publish 토큰은 `can_publish_sources=["microphone"]` + duplex subscribe. 청취는 무인증 subscribe 토큰(TTL 10분).
 - DB 스키마: `db.py`의 `CREATE TABLE IF NOT EXISTS` 패턴. 기존 마이그레이션 수정 금지 — 신규 컬럼은 방어적 ADD.
 
+## 실 키 E2E 확인 (2026-07-15)
+- **gpt-realtime-translate 프로토콜 실측 확인 완료**(키: `~/CursorProjects/ev211/.env` 의 `OPENAI_API_KEY`, field-server `.env` 아님). 영어 음성(macOS `say`+ffmpeg 24kHz PCM16)→ 한국어 실번역 성공.
+- **확인된 계약**(워커 가정과 전부 일치): 엔드포인트 `wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate`, client→server 이벤트는 **`session.` 프리픽스 필수**(`session.update`·`session.input_audio_buffer.append`·`session.close` — 프리픽스 빠지면 invalid_value 거부, 첫 프로브가 이걸로 실패), server→client `session.created`/`session.updated`(type=translation, `expires_at` 존재)·`session.output_audio.delta`(payload sample_rate=24000·channels=1·format=pcm16, 오디오는 `delta` base64)·`session.output_transcript.delta`·`session.input_transcript.delta`. 워커 recv 핸들러·AudioFrame(24kHz mono) 정확.
+- **잠금 테스트**: `api/tests/test_openai_e2e.py`(RUN_OPENAI_E2E=1 + OPENAI_API_KEY 게이트, CI 기본 skip). 실행: `RUN_OPENAI_E2E=1 OPENAI_API_KEY=... pytest api/tests/test_openai_e2e.py`.
+- **미확인 잔여**(라이브 LiveKit 필요): VAD/turn_detection 실동작, 전체 파이프라인(Floor 구독→republish), make-before-break 실검증. `session.created.expires_at` 로 갱신 타이밍 잡을 수 있음(현재 미구현).
+
 ## 열린 항목
 - ev211.com Rails 측 송신 코드 레지스트리·manifest `transport` 필드 = 별도 리포(ev211) 작업, 증분 2~3에서.
-- OpenAI 실 키 + 라이브 LiveKit E2E 검증은 인프라 준비 후.
+- 라이브 LiveKit 포함 전체 파이프라인 E2E 는 클라우드 인프라 준비 후.

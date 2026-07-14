@@ -17,7 +17,8 @@
 - [ ] 자막 data track 발행(현재 on_transcript 콜백까지)
 - [ ] 서버 재시작 시 AI 채널 워커 자동 복원(현재 고아 채널 원자적 close만)
 - [ ] `openapi.yaml`에 `/ai-channels` 3종 계약 반영
-- [ ] 실 OpenAI 키 + 라이브 LiveKit E2E로 이벤트 스키마·오디오 포맷·VAD 재검증
+- [x] **실 키 E2E로 gpt-realtime-translate 프로토콜 확인 완료** — 영어→한국어 실번역 성공("오늘 예배에 오신 걸 환영합니다"), 이벤트명(`session.output_audio.delta`·`session.output_transcript.delta`·`session.input_transcript.delta`)·세션 스키마(type=translation)·오디오 포맷(24kHz PCM16 mono)·`session.*` 프리픽스 전부 워커 가정과 일치. 계약 잠금 테스트 `test_openai_e2e.py`(RUN_OPENAI_E2E 게이트, CI 기본 skip).
+- [ ] **라이브 LiveKit 포함 전체 파이프라인** E2E(원음 구독→번역→republish→청취) — 클라우드 인프라 준비 후. VAD/turn_detection 실동작도 이때 확인.
 
 ## 증분 2 — 클라우드 배포 + 무전기 인증 (서버, 인프라 필요)
 - [ ] `docker-compose.cloud.yml` + LiveKit 내장 TURN(TLS 443) + Caddy `field.ev211.com`
