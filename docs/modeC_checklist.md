@@ -9,8 +9,8 @@
 - [x] `translate_worker.py` — ch-00 구독 → OpenAI WS → ch-NN republish, 세션 갱신 훅(구조)
 - [x] `db.py` 마이그레이션 — channels.source/target_language 방어적 ADD(멱등·동시기동 안전)
 - [x] field-api 엔드포인트 — `POST/DELETE/GET /ai-channels` + 워커 슈퍼바이저(백오프·leaked 수거)
-- [x] pytest(OpenAI·LiveKit mock) 그린 — **203 passed**
-- [x] codex 검수 3회전(11→4→0 수렴) → 수정 반영 → pytest 재그린
+- [x] pytest(OpenAI·LiveKit mock) 그린 — **212 passed**
+- [x] codex 검수 **6회전 수렴**(11→회귀4→미흡1→심층4→3→0, "남은 실제 결함 없음") → 커밋 3개(f33eb60·68213ef·0d1d4ce)
 
 ### 증분 1 후속(Phase C~D로 이월)
 - [ ] make-before-break 오디오 무중단 연속성(둘째 WS 워밍→원자 스위치)
