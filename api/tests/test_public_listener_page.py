@@ -47,3 +47,13 @@ def test_public_and_operator_pages_include_english_language_switching():
     assert "EV211 Interpretation Listener" in listener
     assert "EV211 Field Console" in operator
     assert "localStorage.getItem(storageKey)" in i18n
+
+
+def test_browser_room_connections_use_the_server_advertised_lan_url():
+    listener = (ROOT / "web" / "index.html").read_text()
+    operator = (ROOT / "web" / "admin.html").read_text()
+
+    assert "defaultWsUrl(grant.url)" in listener
+    assert operator.count("defaultWsUrl(grant.url)") == 3
+    assert "new URL(advertisedUrl)" in listener
+    assert "new URL(advertisedUrl)" in operator
