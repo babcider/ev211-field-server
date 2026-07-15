@@ -30,6 +30,13 @@ def test_https_root_serves_public_listener_page_without_admin_redirect():
     assert "redir * /admin.html" not in caddyfile
 
 
+def test_linux_caddy_signaling_proxy_uses_the_server_lan_ip():
+    host_overlay = (ROOT / "docker-compose.host.yml").read_text()
+
+    assert 'LIVEKIT_UPSTREAM: "${FIELD_NODE_IP:-127.0.0.1}:7880"' in host_overlay
+    assert "host.docker.internal:host-gateway" not in host_overlay.split("  caddy:", 1)[1]
+
+
 def test_operator_logout_returns_to_public_listener_page():
     page = (ROOT / "web" / "admin.html").read_text()
 
