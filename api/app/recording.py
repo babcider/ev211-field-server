@@ -36,6 +36,7 @@ class RecordingInfo:
     ended_at: str | None = None
     duration_seconds: float | None = None
     size_bytes: int | None = None
+    language: str | None = None  # 채널 언어 코드(구 녹음 파일은 None)
 
     def public(self, active: bool) -> dict:
         return {
@@ -48,8 +49,41 @@ class RecordingInfo:
             "ended_at": self.ended_at,
             "duration_seconds": self.duration_seconds,
             "size_bytes": self.size_bytes,
+            "language": self.language,
             "active": active,
+            "download_filename": self.download_filename(),
         }
+
+    def download_filename(self) -> str:
+        """채널(언어)_날짜_식별문자3자리.mp3 형태의 사람이 읽기 쉬운 파일명.
+
+        예: ch01-ko_20260714_a3f.mp3 (무전기: ic03_20260714_a3f.mp3).
+        언어 정보가 없으면 라벨에서 유추하고, 그것도 없으면 채널 번호만 쓴다.
+        """
+        prefix = "ic" if self.kind == "intercom" else "ch"
+        chan = f"{prefix}{self.channel_id:02d}"
+        lang = _safe_token(self.language) if self.language else _lang_from_label(self.label)
+        chan_part = f"{chan}-{lang}" if lang else chan
+        try:
+            date = datetime.fromisoformat(self.started_at).strftime("%Y%m%d")
+        except (ValueError, TypeError):
+            date = "00000000"
+        short = self.recording_id.replace("-", "")[:3]
+        return f"{chan_part}_{date}_{short}.mp3"
+
+
+def _safe_token(s: str, limit: int = 12) -> str:
+    """파일명에 안전한 ASCII 토큰(영숫자·하이픈)만 남긴다."""
+    import re
+
+    cleaned = re.sub(r"[^0-9A-Za-z-]", "", (s or "").strip())
+    return cleaned[:limit]
+
+
+def _lang_from_label(label: str) -> str:
+    """'Korean (한국어)' 같은 라벨에서 앞쪽 ASCII 언어명을 짧게 추출한다."""
+    token = _safe_token((label or "").split("(")[0].strip().replace(" ", ""))
+    return token[:8]
 
 
 async def _audio_frames(stream: rtc.AudioStream) -> AsyncIterator[rtc.AudioFrame]:
@@ -261,6 +295,7 @@ class RecordingManager:
         label: str,
         room: str,
         track_name: str | None = None,
+        language: str | None = None,
     ) -> dict:
         key = (kind, channel_id)
         async with self._lock:
@@ -275,6 +310,7 @@ class RecordingManager:
                 label=label,
                 room=room,
                 started_at=datetime.now(timezone.utc).isoformat(),
+                language=language,
             )
             session = _RecordingSession(
                 info,
@@ -351,6 +387,26 @@ class RecordingManager:
         if not path.is_file() or path.parent.resolve() != self._directory.resolve():
             return None
         return path
+
+    def download_filename(self, recording_id: str) -> str:
+        """완결 녹음의 사람이 읽기 쉬운 다운로드 파일명(메타데이터 기반)."""
+        meta = self._directory / f"{recording_id}.json"
+        try:
+            info = RecordingInfo(**json.loads(meta.read_text(encoding="utf-8")))
+            return info.download_filename()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return f"ev211-{recording_id}.mp3"
+
+    def delete(self, recording_id: str) -> bool:
+        """완결된 녹음의 MP3·메타데이터를 삭제한다. 진행 중 녹음은 거부."""
+        if recording_id in self._active:
+            raise RecordingError("진행 중인 녹음은 종료 후 삭제할 수 있습니다.")
+        path = self.download_path(recording_id)  # UUID·디렉터리 이탈 검증 재사용
+        if path is None:
+            return False
+        path.unlink(missing_ok=True)
+        (self._directory / f"{recording_id}.json").unlink(missing_ok=True)
+        return True
 
     async def close(self) -> None:
         for recording_id in list(self._active):

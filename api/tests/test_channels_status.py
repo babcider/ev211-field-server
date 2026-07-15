@@ -68,6 +68,42 @@ def test_heartbeat_aggregation(client, send_headers):
     assert status["listeners_source"] == "heartbeat"
 
 
+def test_heartbeat_keeps_long_lived_listener_counted(client, send_headers, state):
+    """1시간 넘게 연속 heartbeat 하는 청취자는 발급 원장 만료로 사라지지 않아야 한다."""
+    import time
+
+    from app.config import ISSUED_LISTENER_TTL_SECONDS
+
+    _open(client, send_headers)
+    tok = client.post("/channels/1/subscribe-tokens").json()
+    lid = tok["listener_id"]
+    # 발급 시각을 TTL 보다 오래 전으로 되돌려 "오래 접속" 상태를 흉내.
+    old = time.time() - ISSUED_LISTENER_TTL_SECONDS - 10
+    with state.db._tx():  # noqa: SLF001
+        state.db._conn.execute(  # noqa: SLF001
+            "UPDATE issued_listeners SET issued_at=? WHERE listener_id=?", (old, lid)
+        )
+    # heartbeat 가 타임스탬프를 갱신하므로 여전히 인정되어야 한다.
+    r = client.post("/listeners/heartbeat", json={"channel_id": 1, "listener_id": lid})
+    assert r.status_code == 204
+    status = client.get("/status").json()
+    ch1 = next(c for c in status["channels"] if c["channel_id"] == 1)
+    assert ch1["listeners"] == 1
+    assert status["listeners_source"] == "heartbeat"
+
+
+def test_heartbeat_channel_mismatch_ignored(client, send_headers):
+    """발급 채널과 다른 채널로 온 heartbeat 는 무시된다(계수 조작 방지)."""
+    _open(client, send_headers)
+    _open(client, send_headers, channel=2)
+    tok = client.post("/channels/1/subscribe-tokens").json()
+    r = client.post("/listeners/heartbeat", json={"channel_id": 2, "listener_id": tok["listener_id"]})
+    assert r.status_code == 204
+    status = client.get("/status").json()
+    ch2 = next(c for c in status["channels"] if c["channel_id"] == 2)
+    assert ch2["listeners"] == 0
+
+
 def test_heartbeat_unknown_listener_ignored(client, send_headers):
     _open(client, send_headers)
     fake = "00000000-0000-4000-8000-000000000000"

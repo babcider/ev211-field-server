@@ -31,7 +31,10 @@ PUBLISH_LOCK_SECONDS = 300  # 잠금 지속(초)
 ADMIN_FAIL_LIMIT = 5
 ADMIN_LOCK_SECONDS = 300
 PUBLISH_RL_PER_MINUTE = 20  # publish-token 발급 IP당 분당 상한
-ADMIN_RL_PER_MINUTE = 30  # admin(status·takeover) IP당 분당 상한
+# 대시보드가 10초 폴링(상태 3종 = 분당 18회)을 상시 소모하므로 30이면 채널 연속
+# 삭제(건당 삭제+새로고침 4회) 몇 번에 바닥나 정상 조작·로그인까지 막힌다(실운영 결함).
+# 무차별 대입 방어는 ADMIN_FAIL_LIMIT/LOCK(비밀번호 실패 잠금)이 담당한다.
+ADMIN_RL_PER_MINUTE = 120  # admin(status·takeover) IP당 분당 상한
 
 
 @dataclass(frozen=True)
