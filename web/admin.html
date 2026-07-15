@@ -195,6 +195,13 @@
         <label>마이크 장치</label>
         <select id="mic" style="width:100%"></select>
       </div>
+      <div>
+        <label data-i18n="audioQuality">송신 음질</label>
+        <select id="audioQuality" style="width:100%">
+          <option value="music" data-i18n="audioQuality48">48 kbps · 수신 인원 우선</option>
+          <option value="musicHighQuality" data-i18n="audioQuality96" selected>96 kbps · 고음질</option>
+        </select>
+      </div>
       <div style="flex:0"><button id="startBtn" type="button">송신 시작</button></div>
       <div style="flex:0"><button id="stopBtn" type="button" class="danger" disabled>송신 정지</button></div>
     </div>
@@ -215,6 +222,12 @@
         '현장 콘솔': { ko: '현장 콘솔', en: 'Field Console' }, '비밀번호 (관리자 또는 송신자)': { ko: '비밀번호 (관리자 또는 송신자)', en: 'Password (administrator or sender)' }, '접속': { ko: '접속', en: 'Sign in' }, '로그아웃': { ko: '로그아웃', en: 'Sign out' }, '관리자 비밀번호 변경': { ko: '관리자 비밀번호 변경', en: 'Change administrator password' }, '초기 비밀번호(0000)로 접속했습니다. 보안을 위해': { ko: '초기 비밀번호(0000)로 접속했습니다. 보안을 위해', en: 'You signed in with the initial password (0000). For security,' }, '새 비밀번호로 변경해야': { ko: '새 비밀번호로 변경해야', en: 'you must change it to a new password' }, '관리자 기능(채널 삭제·바로미터 등)을 사용할 수 있습니다.': { ko: '관리자 기능(채널 삭제·바로미터 등)을 사용할 수 있습니다.', en: 'before using administrator features such as channel deletion and level meters.' }, '새 비밀번호 (4자 이상, 영문·숫자·기호)': { ko: '새 비밀번호 (4자 이상, 영문·숫자·기호)', en: 'New password (at least 4 ASCII characters)' }, '새 비밀번호 확인': { ko: '새 비밀번호 확인', en: 'Confirm new password' }, '변경': { ko: '변경', en: 'Change' }, '비밀번호 관리': { ko: '비밀번호 관리', en: 'Password management' }, '비밀번호는 4~64자의 영문·숫자·기호를 사용하고 서로 다르게 설정하세요.': { ko: '비밀번호는 4~64자의 영문·숫자·기호를 사용하고 서로 다르게 설정하세요.', en: 'Use different passwords of 4–64 ASCII letters, numbers, or symbols.' }, '새 관리자 비밀번호': { ko: '새 관리자 비밀번호', en: 'New administrator password' }, '새 관리자 비밀번호 확인': { ko: '새 관리자 비밀번호 확인', en: 'Confirm administrator password' }, '송신자 비밀번호 변경': { ko: '송신자 비밀번호 변경', en: 'Change sender password' }, '변경하면 기존 방송·수신·무전기 연결이 모두 끊기고 새 비밀번호로 다시 접속해야 합니다.': { ko: '변경하면 기존 방송·수신·무전기 연결이 모두 끊기고 새 비밀번호로 다시 접속해야 합니다.', en: 'Changing it disconnects all broadcasts, listeners, and intercom sessions; users must sign in again with the new password.' }, '새 송신자 비밀번호': { ko: '새 송신자 비밀번호', en: 'New sender password' }, '새 송신자 비밀번호 확인': { ko: '새 송신자 비밀번호 확인', en: 'Confirm sender password' }, '채널 현황': { ko: '채널 현황', en: 'Channel status' }, '채널': { ko: '채널', en: 'Channel' }, '언어(라벨)': { ko: '언어(라벨)', en: 'Language (label)' }, '송신자 상태': { ko: '송신자 상태', en: 'Sender status' }, '청취자': { ko: '청취자', en: 'Listeners' }, '녹음': { ko: '녹음', en: 'Recording' }, '불러오는 중…': { ko: '불러오는 중…', en: 'Loading.' }, '무전기 채널': { ko: '무전기 채널', en: 'Intercom channels' }, '이름': { ko: '이름', en: 'Name' }, '참가자': { ko: '참가자', en: 'Participants' }, '채널 음성': { ko: '채널 음성', en: 'Channel audio' }, '서버 녹음 파일': { ko: '서버 녹음 파일', en: 'Server recordings' }, '녹음은 서버에서 계속되므로 이 브라우저를 닫아도 유지됩니다.': { ko: '녹음은 서버에서 계속되므로 이 브라우저를 닫아도 유지됩니다.', en: 'Recording continues on the server even if this browser is closed.' }, '종류': { ko: '종류', en: 'Type' }, '시작': { ko: '시작', en: 'Started' }, '길이': { ko: '길이', en: 'Duration' }, '크기': { ko: '크기', en: 'Size' }, '상태': { ko: '상태', en: 'Status' }, '브라우저 송신': { ko: '브라우저 송신', en: 'Browser broadcast' }, '송신에는': { ko: '송신에는', en: 'Broadcasting requires the' }, '송신자 비밀번호': { ko: '송신자 비밀번호', en: 'sender password' }, '가 필요합니다. 이 페이지는 송신 전용이며 수신(모니터링 청취) 기능은 없습니다.': { ko: '가 필요합니다. 이 페이지는 송신 전용이며 수신(모니터링 청취) 기능은 없습니다.', en: '. This page broadcasts only and cannot receive or monitor audio.' }, '채널 번호 (0=Floor)': { ko: '채널 번호 (0=Floor)', en: 'Channel number (0 = Floor)' }, '언어 코드 (새 채널 개설 시)': { ko: '언어 코드 (새 채널 개설 시)', en: 'Language code (when creating a channel)' }, '라벨 (새 채널 개설 시)': { ko: '라벨 (새 채널 개설 시)', en: 'Label (when creating a channel)' }, '마이크 장치': { ko: '마이크 장치', en: 'Microphone device' }, '송신 시작': { ko: '송신 시작', en: 'Start broadcast' }, '송신 정지': { ko: '송신 정지', en: 'Stop broadcast' }, '송신 대기': { ko: '송신 대기', en: 'Waiting to broadcast' }, '대기 중…': { ko: '대기 중…', en: 'Idle.' },
       },
     };
+    strings.ko.audioQuality = '송신 음질';
+    strings.ko.audioQuality48 = '48 kbps · 수신 인원 우선';
+    strings.ko.audioQuality96 = '96 kbps · 고음질';
+    strings.en.audioQuality = 'Audio quality';
+    strings.en.audioQuality48 = '48 kbps · listener capacity';
+    strings.en.audioQuality96 = '96 kbps · high quality';
     let translateDynamic = () => {};
     const i18n = window.EV211I18n.create(strings, () => translateDynamic());
     const t = (key, values) => i18n.t(key, values);
@@ -246,6 +259,12 @@
       const h = location.hostname;
       if (h === 'localhost' || h === '127.0.0.1') return 'ws://localhost:7880';
       return location.protocol === 'https:' ? `wss://${h}:8443` : `ws://${h}:7880`;
+    }
+
+    function selectedAudioPreset() {
+      return $('audioQuality').value === 'music'
+        ? LK.AudioPresets.music
+        : LK.AudioPresets.musicHighQuality;
     }
 
     async function api(path, opts = {}, password = null) {
@@ -762,6 +781,7 @@
         return;
       }
       $('startBtn').disabled = true;
+      $('audioQuality').disabled = true;
       $('startBtn').textContent = t('preparing');
       setSendStatus(t('checkingChannel', { channel: channelId }));
       let localTrack = null;
@@ -829,7 +849,7 @@
           room.localParticipant.publishTrack(localTrack, {
             name: grant.track_name,
             source: LK.Track.Source.Microphone,
-            audioPreset: LK.AudioPresets.musicHighQuality,
+            audioPreset: selectedAudioPreset(),
           }),
           10000,
           t('publishTimeout'),
@@ -872,6 +892,7 @@
         $('startBtn').textContent = t('startBroadcast');
         $('startBtn').disabled = false;
         $('stopBtn').disabled = true;
+        $('audioQuality').disabled = false;
       }
     };
 
@@ -886,6 +907,7 @@
       $('startBtn').textContent = t('startBroadcast');
       $('startBtn').disabled = false;
       $('stopBtn').disabled = true;
+      $('audioQuality').disabled = false;
       if (refreshAfter) {
         if (sessionMode === 'admin') refresh();
         if (sessionMode === 'sender') senderRefresh();

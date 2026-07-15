@@ -66,3 +66,14 @@ def test_browser_room_connections_use_the_page_origin_for_signaling():
     assert "new URL(advertisedUrl)" not in operator
     assert "wss://${host}:8443" in listener
     assert "wss://${h}:8443" in operator
+
+
+def test_browser_sender_can_choose_48_or_96_kbps_audio_quality():
+    page = (ROOT / "web" / "admin.html").read_text()
+
+    assert 'id="audioQuality"' in page
+    assert 'value="music"' in page
+    assert 'value="musicHighQuality"' in page
+    assert "LK.AudioPresets.music" in page
+    assert "audioPreset: selectedAudioPreset()" in page
+    assert "$('audioQuality').disabled = true;" in page
