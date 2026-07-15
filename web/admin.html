@@ -239,19 +239,13 @@
       if (sessionMode === 'sender') senderRefresh();
     };
 
-    // 토큰 응답의 LAN 주소를 우선한다. 페이지를 mDNS·임시 주소로 열어도 인터넷 DNS에
-    // 의존하지 않고 서버가 광고한 현장 IP로 signaling/ICE 경로를 맞춘다.
+    // 브라우저는 페이지를 실제로 연 같은 서버 주소로 signaling 한다. 토큰의 url 값은
+    // 모바일 앱용이라 FIELD_NODE_IP가 오래됐을 때 127.0.0.1을 가리킬 수 있다.
     // ⚠ LiveKit SDK 는 base URL 에 스스로 `/rtc` 를 붙인다(스파이크 페이지와 동일 규약).
-    function defaultWsUrl(advertisedUrl) {
+    function defaultWsUrl() {
       const h = location.hostname;
       if (h === 'localhost' || h === '127.0.0.1') return 'ws://localhost:7880';
-      try {
-        const advertised = new URL(advertisedUrl);
-        if (location.protocol === 'https:') return `wss://${advertised.hostname}:8443`;
-        return advertised.toString();
-      } catch (_) {
-        return location.protocol === 'https:' ? `wss://${h}:8443` : `ws://${h}:7880`;
-      }
+      return location.protocol === 'https:' ? `wss://${h}:8443` : `ws://${h}:7880`;
     }
 
     async function api(path, opts = {}, password = null) {
@@ -516,7 +510,7 @@
           onSpeakers([]);
           if (sessionMode === 'admin') scheduleMonitorRetry(3000); // 세대 회전·서버 재시작 → 새 토큰으로 재접속.
         });
-        await room.connect(defaultWsUrl(grant.url), grant.token, { autoSubscribe: true });
+        await room.connect(defaultWsUrl(), grant.token, { autoSubscribe: true });
         monitorRoom = room;
         log(t('monitorConnected'));
       } catch (e) {
@@ -609,7 +603,7 @@
             setTimeout(() => connectIntercomMonitor(channelId), 3000);
           }
         });
-        await room.connect(defaultWsUrl(grant.url), grant.token, { autoSubscribe: true });
+        await room.connect(defaultWsUrl(), grant.token, { autoSubscribe: true });
         intercomMonitorRooms.set(channelId, room);
       } catch (e) {
         intercomMonitorRooms.delete(channelId);
@@ -802,7 +796,7 @@
         log(t('connectingVoiceLog'));
         room = new LK.Room({ adaptiveStream: false, dynacast: false });
         await withTimeout(
-          room.connect(defaultWsUrl(grant.url), grant.token),
+          room.connect(defaultWsUrl(), grant.token),
           12000,
           t('voiceTimeout'),
         );

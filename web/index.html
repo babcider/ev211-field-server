@@ -106,18 +106,12 @@
       if (channels.length) renderChannels();
     };
 
-    // 토큰 응답의 LAN 주소를 우선한다. 페이지를 mDNS·임시 주소로 열어도 인터넷 DNS에
-    // 의존하지 않고 서버가 광고한 현장 IP로 signaling/ICE 경로를 맞춘다.
-    function defaultWsUrl(advertisedUrl) {
+    // 브라우저는 페이지를 실제로 연 같은 서버 주소로 signaling 한다. 토큰의 url 값은
+    // 모바일 앱용이라 FIELD_NODE_IP가 오래됐을 때 127.0.0.1을 가리킬 수 있다.
+    function defaultWsUrl() {
       const host = location.hostname;
       if (host === 'localhost' || host === '127.0.0.1') return 'ws://localhost:7880';
-      try {
-        const advertised = new URL(advertisedUrl);
-        if (location.protocol === 'https:') return `wss://${advertised.hostname}:8443`;
-        return advertised.toString();
-      } catch (_) {
-        return location.protocol === 'https:' ? `wss://${host}:8443` : `ws://${host}:7880`;
-      }
+      return location.protocol === 'https:' ? `wss://${host}:8443` : `ws://${host}:7880`;
     }
 
     async function api(path, options = {}) {
@@ -287,7 +281,7 @@
         room = nextRoom;
         bindRoom(nextRoom);
         setStatus(t('connectingServer'));
-        await nextRoom.connect(defaultWsUrl(grant.url), grant.token, { autoSubscribe: false });
+        await nextRoom.connect(defaultWsUrl(), grant.token, { autoSubscribe: false });
         if (room !== nextRoom) return;
         retryCount = 0;
         subscribeExpectedTrack(nextRoom);

@@ -56,11 +56,13 @@ def test_public_and_operator_pages_include_english_language_switching():
     assert "localStorage.getItem(storageKey)" in i18n
 
 
-def test_browser_room_connections_use_the_server_advertised_lan_url():
+def test_browser_room_connections_use_the_page_origin_for_signaling():
     listener = (ROOT / "web" / "index.html").read_text()
     operator = (ROOT / "web" / "admin.html").read_text()
 
-    assert "defaultWsUrl(grant.url)" in listener
-    assert operator.count("defaultWsUrl(grant.url)") == 3
-    assert "new URL(advertisedUrl)" in listener
-    assert "new URL(advertisedUrl)" in operator
+    assert "defaultWsUrl(grant.url)" not in listener
+    assert "defaultWsUrl(grant.url)" not in operator
+    assert "new URL(advertisedUrl)" not in listener
+    assert "new URL(advertisedUrl)" not in operator
+    assert "wss://${host}:8443" in listener
+    assert "wss://${h}:8443" in operator
