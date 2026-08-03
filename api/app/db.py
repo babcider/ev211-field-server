@@ -477,6 +477,13 @@ class Database:
                 )
         return ids
 
+    def list_open_ai_channels(self) -> list[ChannelRow]:
+        """열린 AI 통역 채널 행 전체를 반환한다(재시작 후 워커 복원용, read-only)."""
+        rows = self._query(
+            "SELECT * FROM channels WHERE source='ai' AND state='open' ORDER BY channel_id"
+        )
+        return [self._to_channel(r) for r in rows]
+
     def list_open_ai_channels_by_source(self, source_channel: int) -> list[int]:
         """source_channel 을 원음으로 구독하는 열린 AI 채널 id 목록을 반환한다(결함4 cascade, read-only)."""
         rows = self._query(

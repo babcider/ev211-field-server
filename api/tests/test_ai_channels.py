@@ -24,6 +24,8 @@ class FakeWorker:
     session_age_seconds = None
     last_audio_at = None
     seq = 0
+    caption_seq = 0
+    renewals = 0
     renewal_due = False
     ready = None  # 슈퍼바이저가 채널 공용 준비 이벤트를 주입한다(MED8).
     token_provider = None
@@ -240,19 +242,79 @@ def test_takeover_rejects_ai_channel(ai_client, send_headers):
     assert st.db.get_lease(1) is not None
 
 
-# ---- HIGH2: 재시작(bootstrap)·송신 비번 회전 시 고아 AI 채널 정리 ----
-def test_bootstrap_closes_orphan_ai_channels(tmp_path):
-    settings = dataclasses.replace(make_settings(tmp_path), openai_api_key="sk-test")
+# ---- HIGH2: 재시작(bootstrap)·송신 비번 회전 시 AI 채널 복원/정리 ----
+def _restart_state(tmp_path, openai_api_key="sk-test", send_password=None):
+    """이전 프로세스가 남긴 open AI 채널이 있는 상태로 재기동을 흉내낸다."""
+    settings = make_settings(tmp_path)
+    if send_password is not None:
+        settings = dataclasses.replace(settings, send_password=send_password)
+    settings = dataclasses.replace(settings, openai_api_key=openai_api_key)
     db = Database(settings.db_path)
-    # 이전 프로세스가 남긴 open AI 채널(인메모리 워커 없음)을 흉내낸다.
-    db.create_channel(3, "en", "AI: en", source="ai", target_language="en")
+    db.create_channel(3, "en", "AI: en", source="ai", target_language="en", source_channel=0)
     db.acquire_lease(3, 1, 1, "abc123", 3600, 120)
-    lk = MockLiveKit()
-    st = AppState(settings, db, lk)
+    st = AppState(settings, db, MockLiveKit())
+    # 실 워커 대신 fake 워커로 복원 결과만 관찰한다(실 LiveKit/OpenAI 접속 회피).
+    st.ai_channels = AiChannelManager(
+        lambda params: FakeWorker(), backoff_base=0.0, max_backoff=0.0
+    )
+    return settings, db, st
+
+
+def test_bootstrap_restores_open_ai_channels(tmp_path):
+    _settings, db, st = _restart_state(tmp_path)
+    # 재기동 전 세대 기록을 심어 세대 변경이 아닌 순수 재시작으로 만든다.
+    from app.state import password_hash
+
+    db.set_generation(1, password_hash(st.send_password, st.admin_password))
+
     _run(st.bootstrap())
-    ch = db.get_channel(3)
-    assert ch.state == "closed"  # 고아 채널 정리
-    assert db.get_lease(3) is None  # 슬롯 반납
+
+    assert db.get_channel(3).state == "open"  # 채널 유지
+    assert st.ai_channels.has(3) is True  # 워커 재스폰
+    lease = db.get_lease(3)
+    assert lease is not None and lease.identity != "abc123"  # 새 lease·identity 발급
+    _run(st.ai_channels.close())
+    db.close()
+
+
+def test_bootstrap_closes_ai_channels_without_openai_key(tmp_path):
+    _settings, db, st = _restart_state(tmp_path, openai_api_key="")
+    _run(st.bootstrap())
+    # 키가 없으면 워커를 띄울 수 없으므로 슬롯을 반납한다.
+    assert db.get_channel(3).state == "closed"
+    assert db.get_lease(3) is None
+    assert st.ai_channels.has(3) is False
+    db.close()
+
+
+def test_bootstrap_closes_ai_channels_on_generation_change(tmp_path):
+    _settings, db, st = _restart_state(tmp_path)
+    # 이전 세대 해시를 다른 비밀번호로 심어 세대 회전을 유발한다(구세대 토큰 무효).
+    from app.state import password_hash
+
+    db.set_generation(1, password_hash("old-send-pw", "old-admin-pw"))
+
+    _run(st.bootstrap())
+
+    assert st.generation == 2
+    assert db.get_channel(3).state == "closed"
+    assert st.ai_channels.has(3) is False
+    db.close()
+
+
+def test_restore_closes_channel_when_token_issue_fails(tmp_path, monkeypatch):
+    _settings, db, st = _restart_state(tmp_path)
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("lease 발급 실패")
+
+    monkeypatch.setattr(st.db, "force_acquire_lease", _boom)
+    restored = _run(st.restore_ai_channels())
+
+    # 복원 실패 채널은 슬롯을 영구 점유하지 않도록 닫는다.
+    assert restored == []
+    assert db.get_channel(3).state == "closed"
+    assert st.ai_channels.has(3) is False
     db.close()
 
 

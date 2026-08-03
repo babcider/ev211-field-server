@@ -12,13 +12,13 @@
 - [x] pytest(OpenAI·LiveKit mock) 그린 — **212 passed**
 - [x] codex 검수 **6회전 수렴**(11→회귀4→미흡1→심층4→3→0, "남은 실제 결함 없음") → 커밋 3개(f33eb60·68213ef·0d1d4ce)
 
-### 증분 1 후속(Phase C~D로 이월)
-- [ ] make-before-break 오디오 무중단 연속성(둘째 WS 워밍→원자 스위치)
-- [ ] 자막 data track 발행(현재 on_transcript 콜백까지)
-- [ ] 서버 재시작 시 AI 채널 워커 자동 복원(현재 고아 채널 원자적 close만)
-- [ ] `openapi.yaml`에 `/ai-channels` 3종 계약 반영
+### 증분 1 후속 ✅ 완료(2026-08-03)
+- [x] make-before-break 오디오 무중단 연속성(둘째 WS 워밍→원자 스위치→8초 드레인, 실패 시 구세션 유지·30초 재시도)
+- [x] 자막 data track 발행(topic `captions`, `issue_publish_token(can_publish_data=True)` 는 AI 워커 토큰만)
+- [x] 서버 재시작 시 AI 채널 워커 자동 복원(`AppState.restore_ai_channels`, 세대 변경·키 부재는 기존대로 close)
+- [x] `openapi.yaml`에 `/ai-channels` 3종 계약 반영(tag `ai` + 스키마 3종, validator OK)
 - [x] **실 키 E2E로 gpt-realtime-translate 프로토콜 확인 완료** — 영어→한국어 실번역 성공("오늘 예배에 오신 걸 환영합니다"), 이벤트명(`session.output_audio.delta`·`session.output_transcript.delta`·`session.input_transcript.delta`)·세션 스키마(type=translation)·오디오 포맷(24kHz PCM16 mono)·`session.*` 프리픽스 전부 워커 가정과 일치. 계약 잠금 테스트 `test_openai_e2e.py`(RUN_OPENAI_E2E 게이트, CI 기본 skip).
-- [ ] **라이브 LiveKit 포함 전체 파이프라인** E2E(원음 구독→번역→republish→청취) — 클라우드 인프라 준비 후. VAD/turn_detection 실동작도 이때 확인.
+- [x] **라이브 LiveKit 포함 전체 파이프라인 E2E 통과(2026-08-03)** — 로컬 도커 스택(livekit+field-api)에서 원음 ch-00 publish→워커 구독→번역→ch-01 republish→청취까지 실동작. 하니스 `scripts/ai_live_e2e.py`, 첫 소리 지연 3.1~3.4초, 자막 101패킷, 번역 역전사로 한국어 확인. 클라우드 인프라 불필요했음.
 
 ## 증분 2 — 클라우드 배포 + 무전기 인증 (서버, 인프라 필요)
 - [ ] `docker-compose.cloud.yml` + LiveKit 내장 TURN(TLS 443) + Caddy `field.ev211.com`

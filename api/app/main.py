@@ -1001,7 +1001,8 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                     st.db.close_channel(cid)
                     return _err("channel_busy", "채널 점유에 실패했습니다. 다시 시도하세요.", 409)
                 token = issue_publish_token(
-                    st.settings.livekit_api_key, st.settings.livekit_api_secret, st.generation, identity
+                    st.settings.livekit_api_key, st.settings.livekit_api_secret, st.generation, identity,
+                    can_publish_data=True,  # 워커가 자막(원문·번역)을 data 패킷으로 발행한다.
                 )
                 params = AiWorkerParams(
                     channel_id=cid,
@@ -1013,7 +1014,8 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                     subscribe_track=f"ch-{body.source_channel:02d}",
                 )
                 # 매 (재)접속 시 fresh publish 토큰(+lease 재획득)을 주는 프로바이더 주입(HIGH1).
-                channel = st.ai_channels.start(params, token_provider=_ai_token_provider(st, cid))
+                # 재시작 복원 경로(AppState.restore_ai_channels)와 동일한 프로바이더를 쓴다.
+                channel = st.ai_channels.start(params, token_provider=st.ai_token_provider(cid))
                 st.record_signal_event(
                     direction="send",
                     event_type="ai_channel_created",
@@ -1620,31 +1622,6 @@ def _channel_full(st: AppState, ch) -> dict:
     view = _channel_view(st, ch)
     view["created_at"] = _dt.datetime.fromtimestamp(ch.created_at, tz=_dt.timezone.utc).isoformat()
     return view
-
-
-def _ai_token_provider(st: AppState, channel_id: int):
-    """AI 워커가 매 (재)접속 시 호출하는 fresh publish 토큰 프로바이더(HIGH1).
-
-    채널 슬롯 기준으로 lease 를 재획득(force)하고 새 identity 로 publish 토큰을 발급한다.
-    슈퍼바이저가 재시작할 때마다 새 JWT·lease 를 받으므로 '최초 1시간 토큰 재사용 →
-    1시간 뒤 영구 재접속 거절' 결함이 사라진다. 워커가 join 하기 전에 lease.identity 가
-    먼저 갱신되므로 webhook 강제(identity 일치)도 통과한다. 채널이 닫혔으면 예외를 던져
-    슈퍼바이저 루프가 (stop 신호와 함께) 자연 종료하게 한다.
-    """
-
-    async def provider() -> str:
-        ch = st.db.get_channel(channel_id)
-        if ch is None or ch.state != "open" or ch.source != "ai":
-            raise RuntimeError(f"ai channel {channel_id} not open")
-        nonce = new_nonce()
-        identity = st.db.force_acquire_lease(
-            channel_id, ch.epoch, st.generation, nonce, PUBLISH_TTL_SECONDS
-        )
-        return issue_publish_token(
-            st.settings.livekit_api_key, st.settings.livekit_api_secret, st.generation, identity
-        )
-
-    return provider
 
 
 def _ai_source_cycle(st: AppState, output_cid: int, source_channel: int) -> bool:

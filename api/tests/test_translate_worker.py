@@ -21,6 +21,25 @@ def _run(coro):
     return asyncio.get_event_loop().run_until_complete(coro)
 
 
+def _run_recv(worker) -> None:
+    """활성 세션 reader(세션→공용 큐) + 소비 루프를 함께 돌린다(다중 세션 구조).
+
+    make-before-break 이후 수신은 '세션별 reader → 공용 큐 → 단일 소비 루프' 구조라,
+    소비 루프만 단독으로 돌리면 큐가 비어 영원히 대기한다.
+    """
+
+    async def body():
+        worker._start_reader(worker._session)
+        try:
+            await asyncio.wait_for(worker._recv_loop(), timeout=5)
+        finally:
+            for t in worker._reader_tasks:
+                t.cancel()
+            await asyncio.gather(*worker._reader_tasks, return_exceptions=True)
+
+    _run(body())
+
+
 def _params(channel_id: int = 1) -> AiWorkerParams:
     return AiWorkerParams(
         channel_id=channel_id,
@@ -147,7 +166,7 @@ def test_recv_loop_processes_event_stream(monkeypatch):
     worker._source = FakeSource()
     worker._session = FakeSession(events)
 
-    _run(worker._recv_loop())
+    _run_recv(worker)
 
     assert len(worker._source.frames) == 2  # 오디오 델타 2건만 발행
     assert worker.seq == 2
@@ -181,7 +200,174 @@ class _Bytesish:
         return self._raw
 
 
-# ---- 세션 갱신 훅(구조만) ----
+# ---- 자막 data 패킷 발행 ----
+class FakeLocalParticipant:
+    def __init__(self, fail: bool = False):
+        self.published = []
+        self._fail = fail
+
+    async def publish_data(self, payload, reliable=True, topic=""):
+        if self._fail:
+            raise RuntimeError("data channel down")
+        self.published.append((payload, reliable, topic))
+
+
+class FakeRoom:
+    def __init__(self, fail: bool = False):
+        self.local_participant = FakeLocalParticipant(fail)
+        self.disconnected = False
+
+    async def disconnect(self):
+        self.disconnected = True
+
+
+def test_transcript_delta_publishes_caption_data_packet():
+    import json as _json
+
+    worker = TranslateWorker(_params(), session_factory=lambda: FakeSession())
+    room = FakeRoom()
+    worker._room = room
+
+    _run(worker._handle_event({"type": "session.output_transcript.delta", "delta": "안녕"}))
+    _run(worker._handle_event({"type": "session.input_transcript.delta", "delta": "hello"}))
+
+    assert len(room.local_participant.published) == 2
+    payload, reliable, topic = room.local_participant.published[0]
+    body = _json.loads(payload.decode())
+    assert topic == "captions" and reliable is True
+    assert body["kind"] == "target"
+    assert body["language"] == "en"  # _params 의 target_language
+    assert body["delta"] == "안녕"
+    assert body["channel_id"] == 1 and body["track_name"] == "ch-01"
+    assert body["seq"] == 1
+    # 원문 자막은 언어 표기 없이 source 로 구분한다.
+    src = _json.loads(room.local_participant.published[1][0].decode())
+    assert src["kind"] == "source" and src["language"] is None and src["seq"] == 2
+    assert worker.caption_seq == 2
+
+
+def test_caption_publish_failure_does_not_break_pipeline(monkeypatch):
+    monkeypatch.setattr("app.translate_worker.rtc.AudioFrame", FakeAudioFrame)
+    seen = []
+    worker = TranslateWorker(
+        _params(),
+        session_factory=lambda: FakeSession(),
+        on_transcript=lambda kind, text: seen.append((kind, text)),
+    )
+    worker._room = FakeRoom(fail=True)
+    worker._source = FakeSource()
+
+    # 자막 발행이 실패해도 이벤트 처리는 계속되고 오디오 경로는 영향받지 않는다.
+    assert _run(worker._handle_event({"type": "session.output_transcript.delta", "delta": "x"})) is True
+    pcm = base64.b64encode(b"\x01\x00").decode()
+    _run(worker._handle_event({"type": "session.output_audio.delta", "delta": pcm}))
+    assert seen == [("target", "x")]
+    assert worker.seq == 1
+    assert worker._caption_failed is True
+
+
+def test_empty_caption_delta_is_ignored():
+    worker = TranslateWorker(_params(), session_factory=lambda: FakeSession())
+    worker._room = FakeRoom()
+    _run(worker._handle_event({"type": "session.output_transcript.delta", "delta": ""}))
+    assert worker.caption_seq == 0
+    assert worker._room.local_participant.published == []
+
+
+# ---- make-before-break 세션 갱신 ----
+def test_renew_session_switches_atomically_and_drains_old(monkeypatch):
+    import app.translate_worker as tw
+
+    monkeypatch.setattr(tw, "AI_SESSION_DRAIN_SECONDS", 0.0)
+
+    async def body():
+        old = FakeSession()
+        new = FakeSession()
+        worker = TranslateWorker(_params(), session_factory=lambda: new)
+        worker._session = old
+        worker.session_started_at = 0.0
+
+        await worker._renew_session()
+
+        # 활성 세션이 원자적으로 교체되고(새 세션은 이미 connect 완료), 구세션은 드레인 대상.
+        assert worker._session is new
+        assert new.connected_language == "en"
+        assert worker.renewals == 1
+        assert worker.renewal_due is False  # session_started_at 갱신됨
+        assert old.closed is False  # 스위치 직후에는 아직 살아 있다(잔여 출력 수거)
+        await asyncio.gather(*worker._pump_tasks)
+        assert old.closed is True
+        assert worker._draining == set()
+
+    _run(body())
+
+
+def test_renew_failure_keeps_old_session():
+    class DeadSession(FakeSession):
+        async def connect(self, target_language):
+            raise RuntimeError("openai down")
+
+    async def body():
+        old = FakeSession()
+        worker = TranslateWorker(_params(), session_factory=lambda: DeadSession())
+        worker._session = old
+
+        with pytest.raises(RuntimeError):
+            await worker._renew_session()
+
+        # 워밍 실패 시 활성 세션은 구세션 그대로 — 오디오가 끊기지 않는다.
+        assert worker._session is old
+        assert old.closed is False
+        assert worker.renewals == 0
+
+    _run(body())
+
+
+def test_stale_session_audio_is_emitted_and_its_end_ignored(monkeypatch):
+    """스위치된 구세션의 잔여 오디오는 계속 발행하고, 구세션 종료는 루프를 끝내지 않는다."""
+    monkeypatch.setattr("app.translate_worker.rtc.AudioFrame", FakeAudioFrame)
+    pcm = base64.b64encode(b"\x01\x00").decode()
+
+    async def body():
+        active = FakeSession([{"type": "session.closed"}])
+        stale = FakeSession([{"type": "session.output_audio.delta", "delta": pcm}])
+        worker = TranslateWorker(_params(), session_factory=lambda: FakeSession())
+        worker._source = FakeSource()
+        worker._session = active
+        # 구세션 이벤트를 먼저 큐에 넣고, 그 뒤 활성 세션 종료가 소비 루프를 끝낸다.
+        worker._start_reader(stale)
+        await asyncio.sleep(0)
+        worker._start_reader(active)
+        await asyncio.wait_for(worker._recv_loop(), timeout=5)
+
+        assert len(worker._source.frames) == 1  # 구세션 잔여 오디오도 발행됨
+        for t in worker._reader_tasks:
+            t.cancel()
+        await asyncio.gather(*worker._reader_tasks, return_exceptions=True)
+
+    _run(body())
+
+
+def test_stale_session_error_does_not_crash_worker(monkeypatch):
+    async def body():
+        active = FakeSession([{"type": "session.closed"}])
+        worker = TranslateWorker(_params(), session_factory=lambda: FakeSession())
+        worker._session = active
+        # 구세션의 OpenAI error 이벤트는 무시된다(활성 세션이 아니므로 재시작 사유가 아님).
+        await worker._event_q.put(
+            (FakeSession(), {"type": "error", "error": {"message": "stale"}}, None)
+        )
+        await worker._event_q.put((FakeSession(), None, RuntimeError("stale ws closed")))
+        worker._start_reader(active)
+        await asyncio.wait_for(worker._recv_loop(), timeout=5)
+        for t in worker._reader_tasks:
+            t.cancel()
+        await asyncio.gather(*worker._reader_tasks, return_exceptions=True)
+
+    _run(body())
+
+
+# ---- 세션 갱신 훅 ----
 def test_renewal_due_flips_after_threshold(monkeypatch):
     import app.translate_worker as tw
 
@@ -205,6 +391,8 @@ class BlockingWorker:
     session_age_seconds = None
     last_audio_at = None
     seq = 0
+    caption_seq = 0
+    renewals = 0
     renewal_due = False
 
     def __init__(self):
@@ -307,7 +495,7 @@ def test_session_closed_stops_recv_loop(monkeypatch):
     worker = TranslateWorker(_params(), session_factory=lambda: FakeSession())
     worker._source = FakeSource()
     worker._session = FakeSession(events)
-    _run(worker._recv_loop())
+    _run_recv(worker)
     assert len(worker._source.frames) == 1  # session.closed 에서 즉시 종료
 
 

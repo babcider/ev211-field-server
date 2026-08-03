@@ -64,19 +64,24 @@ def issue_subscribe_token(
 
 
 def issue_publish_token(
-    api_key: str, api_secret: str, generation: int, identity: str
+    api_key: str, api_secret: str, generation: int, identity: str,
+    can_publish_data: bool = False,
 ) -> str:
     """송신 토큰을 발급한다. identity 는 lease 획득 시 결정된 규약 문자열.
 
     canPublishSources=[microphone] + canSubscribe=true(Floor duplex). 트랙명은
     grant 로 제한 불가하므로 채널 격리는 identity + 웹훅 강제로 달성한다.
+
+    can_publish_data 는 AI 통역 워커 전용이다 — 워커가 자막(원문·번역)을 data
+    패킷으로 발행해야 하기 때문. 사람 송신자는 기본값 False 로 유지한다(자막
+    위조·잡음 방지).
     """
     grants = VideoGrants(
         room=room_name(generation),
         room_join=True,
         can_publish=True,
         can_subscribe=True,  # duplex — 통역사가 Floor(ch-00) 동시 수신
-        can_publish_data=False,
+        can_publish_data=can_publish_data,
         can_publish_sources=["microphone"],
     )
     return (

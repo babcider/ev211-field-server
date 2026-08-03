@@ -26,8 +26,12 @@ AI_TRANSLATE_INPUT_MODEL = "gpt-realtime-whisper"  # 세션 내부 입력 전사
 AI_TRANSLATE_URL = "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate"
 AI_INPUT_SAMPLE_RATE = 24_000  # OpenAI 입출력 PCM16 mono 표본율(24kHz 고정)
 AI_FLOOR_SAMPLE_RATE = 48_000  # LiveKit Floor(ch-00) 원음 표본율
-# 세션 60분 한계 대비 T-5분 make-before-break 예정 지점(구조만 마련, 실 구현은 후속).
+# 세션 60분 한계 대비 T-5분 make-before-break 갱신 지점(둘째 WS 워밍 → 원자 스위치).
 AI_SESSION_RENEW_SECONDS = 55 * 60
+AI_SESSION_RENEW_CHECK_SECONDS = 10.0  # 갱신 시점 도달 여부 점검 주기
+AI_SESSION_DRAIN_SECONDS = 8.0  # 스위치 후 구세션 잔여 출력 수거 시간(이후 close)
+AI_SESSION_RENEW_RETRY_SECONDS = 30.0  # 갱신 실패 시 재시도 간격(구세션은 계속 사용)
+AI_CAPTION_TOPIC = "captions"  # 자막 data 패킷 topic(청취 앱이 이 topic 으로 필터)
 AI_WORKER_BACKOFF_BASE_SECONDS = 1.0  # 워커 크래시 재시작 백오프 초기값
 AI_WORKER_BACKOFF_MAX_SECONDS = 30.0  # 백오프 상한
 AI_WORKER_STOP_TIMEOUT_SECONDS = 5.0  # 워커 stop 1건당 상한(한 워커 지연이 전체 종료를 막지 않게)
