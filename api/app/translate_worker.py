@@ -205,6 +205,10 @@ class TranslateWorker:
         self.started_at: float | None = None
         self.session_started_at: float | None = None
         self.last_audio_at: float | None = None
+        # 원음(Floor) 프레임을 마지막으로 받은 시각. 발행자가 사라지면 갱신이 멈추므로
+        # 비용 가드(idle 자동 종료)의 판정 근거가 된다. 무음이라도 발행 중이면 프레임은
+        # 계속 오므로, 이 값이 멈춘다는 것은 '송신 자체가 없다'는 뜻이다.
+        self.last_floor_frame_at: float | None = None
 
     # ---- 헬스 ----
     @property
@@ -344,6 +348,7 @@ class TranslateWorker:
         """Floor AudioStream 프레임을 큐로 흘려보낸다(큐가 차면 오래된 프레임 폐기·논블록)."""
         async for event in stream:
             frame = event.frame
+            self.last_floor_frame_at = time.time()
             if floor_frames.full():
                 with_suppress_get(floor_frames)
             floor_frames.put_nowait(frame)
@@ -667,6 +672,16 @@ class AiTranslateChannel:
             await asyncio.wait({task}, timeout=timeout)
         return task.done()
 
+    def floor_idle_seconds(self) -> float:
+        """원음 미수신 경과(초) — 비용 가드(idle 자동 종료) 판정값.
+
+        프레임을 한 번도 못 받았으면 **채널 개설 시각**부터 센다. 워커의 started_at 은
+        크래시 재시작마다 초기화되므로 그걸 기준으로 삼으면 재시작을 반복하는 채널이
+        idle 판정을 영원히 회피한다 — 기준은 재시작에도 유지되는 채널 시각이어야 한다.
+        """
+        last = getattr(self._worker, "last_floor_frame_at", None) if self._worker else None
+        return time.time() - (last if last is not None else self.started_at)
+
     def status(self) -> dict:
         worker = self._worker
         running = self._task is not None and not self._task.done()
@@ -687,6 +702,8 @@ class AiTranslateChannel:
             "started_at": _iso(self.started_at),
             "session_age_seconds": worker.session_age_seconds if worker else None,
             "last_audio_at": _iso(worker.last_audio_at) if worker else None,
+            "last_floor_frame_at": _iso(worker.last_floor_frame_at) if worker else None,
+            "floor_idle_seconds": self.floor_idle_seconds(),
             "seq": worker.seq if worker else 0,
             "caption_seq": worker.caption_seq if worker else 0,
             "renewals": worker.renewals if worker else 0,

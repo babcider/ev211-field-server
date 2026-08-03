@@ -13,6 +13,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .config import (
+    AI_IDLE_CHECK_SECONDS,
+    AI_IDLE_CLOSE_SECONDS,
     AI_READY_TIMEOUT_SECONDS,
     AI_SUPPORTED_OUTPUT_LANGUAGES,
     AI_WORKER_STOP_TIMEOUT_SECONDS,
@@ -195,6 +197,68 @@ class RecordingDeleteBatchBody(BaseModel):
     recording_ids: list[str] = Field(min_length=1, max_length=200)
 
 
+async def _ai_idle_sweep(st: AppState) -> list[int]:
+    """원음이 끊긴 AI 통역 채널을 닫는다(비용 가드). 반환: 닫은 채널 id 목록.
+
+    워커는 무음까지 OpenAI 로 계속 append 하므로, 송신자가 사라졌는데 채널이 열려 있으면
+    토큰이 계속 나간다. `floor_idle_seconds`(원음 프레임 미수신 경과)가 임계를 넘으면
+    DELETE 와 같은 절차로 정지·정리한다.
+
+    락 규약: 채널마다 자기 channel_lock 하나만 잡고(중첩 없음 → 교착 불가), cascade 는
+    락을 놓은 뒤 호출한다(readiness 롤백 경로와 동일).
+    """
+    closed: list[int] = []
+    for ch in st.db.list_open_ai_channels():
+        cid = ch.channel_id
+        status = st.ai_channels.status(cid)
+        if status is None:
+            continue  # 레지스트리에 없는 채널은 복원·회전 경로가 처리한다.
+        idle = status.get("floor_idle_seconds")
+        if idle is None or idle < AI_IDLE_CLOSE_SECONDS:
+            continue
+        async with st.channel_lock(cid):
+            cur = st.db.get_channel(cid)
+            if cur is None or cur.state != "open" or cur.source != "ai":
+                continue  # 대기 중 닫혔거나 슬롯이 재사용됨.
+            lease = st.db.get_lease(cid)
+            await st.ai_channels.stop(cid, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS)
+            if lease is not None:
+                try:
+                    await asyncio.wait_for(
+                        _try_remove(st, lease.identity), timeout=AI_WORKER_STOP_TIMEOUT_SECONDS
+                    )
+                except Exception:  # noqa: BLE001 — 실패해도 DB 는 닫고 webhook reconcile 에 맡긴다
+                    log.warning("ai_idle_close_remove_failed ch=%s", cid)
+            st.db.close_channel(cid)
+            st.on_air.clear_channel(cid)
+            st.record_signal_event(
+                direction="send",
+                event_type="ai_channel_idle_closed",
+                scope="relay",
+                channel_id=cid,
+                room=st.room,
+                subject=lease.identity if lease is not None else "",
+                client_ip="",
+            )
+            closed.append(cid)
+        await _close_dependent_ai_channels(st, cid)
+    if closed:
+        log.info("ai_channels_idle_closed channels=%s idle_s=%s", closed, AI_IDLE_CLOSE_SECONDS)
+    return closed
+
+
+async def _ai_idle_sweep_loop(state: AppState) -> None:
+    """주기적으로 idle AI 채널을 정리한다(일시 오류로 루프가 죽지 않게 흡수)."""
+    while True:
+        await asyncio.sleep(AI_IDLE_CHECK_SECONDS)
+        try:
+            await _ai_idle_sweep(state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — 다음 주기에 재시도
+            log.exception("ai_idle_sweep_failed")
+
+
 async def _signal_log_cleanup_loop(state: AppState) -> None:
     """하루마다 30일 보존 기한을 지난 신호 이벤트를 정리한다."""
     while True:
@@ -230,12 +294,15 @@ def create_app(state: AppState | None = None) -> FastAPI:
         if deleted:
             log.info("purged_signal_events_on_startup count=%s", deleted)
         cleanup_task = asyncio.create_task(_signal_log_cleanup_loop(app.state.field))
+        # 비용 가드: 원음이 끊긴 AI 채널을 주기적으로 닫는다(OpenAI 토큰 유출 차단).
+        idle_task = asyncio.create_task(_ai_idle_sweep_loop(app.state.field))
         try:
             yield
         finally:
-            cleanup_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await cleanup_task
+            for task in (cleanup_task, idle_task):
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
             # AI 워커 정지가 한 워커의 지연에 물려 녹음·DB 정리까지 막지 않도록,
             # 정지는 (내부적으로 병렬+타임아웃인) close 에 맡기고 예외를 흡수하며,
             # 녹음·DB 정리는 중첩 finally 로 반드시 수행한다(MED7).

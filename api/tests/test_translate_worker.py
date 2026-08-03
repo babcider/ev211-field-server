@@ -390,6 +390,7 @@ class BoomWorker:
 class BlockingWorker:
     session_age_seconds = None
     last_audio_at = None
+    last_floor_frame_at = None
     seq = 0
     caption_seq = 0
     renewals = 0

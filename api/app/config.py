@@ -36,6 +36,11 @@ AI_WORKER_BACKOFF_BASE_SECONDS = 1.0  # 워커 크래시 재시작 백오프 초
 AI_WORKER_BACKOFF_MAX_SECONDS = 30.0  # 백오프 상한
 AI_WORKER_STOP_TIMEOUT_SECONDS = 5.0  # 워커 stop 1건당 상한(한 워커 지연이 전체 종료를 막지 않게)
 AI_READY_TIMEOUT_SECONDS = 8.0  # AI 채널 개설 시 워커 최초 접속 준비 대기 상한(초과 시 503 롤백)
+# 비용 가드: 원음(Floor)이 이 시간 동안 한 프레임도 오지 않으면 AI 채널을 자동 종료한다.
+# 워커는 무음까지 OpenAI 로 계속 append 하므로(서버 VAD 계약), 송신을 켜둔 채 방치하거나
+# 채널을 닫지 않으면 토큰이 계속 나간다. 발행자가 사라진 채널은 서버가 스스로 닫는다.
+AI_IDLE_CLOSE_SECONDS = 10 * 60
+AI_IDLE_CHECK_SECONDS = 60.0  # idle 스윕 주기
 # gpt-realtime-translate 가 출력 가능한 언어 13종(소문자 ISO). 입력은 70+ 언어.
 AI_SUPPORTED_OUTPUT_LANGUAGES = frozenset(
     {"es", "pt", "fr", "ja", "ru", "zh", "de", "ko", "hi", "id", "vi", "it", "en"}

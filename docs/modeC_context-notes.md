@@ -40,6 +40,13 @@
 - **실서버 확인**: AI 채널 개설 → `docker restart field-api` → 채널 state=open 유지·워커 running=true·새 세션으로 복원됨.
 - `openapi.yaml` 에 `/ai-channels` 3종 + `AiChannelCreate`·`AiChannel`·`AiChannelWorker` 스키마 + tag `ai` 반영(openapi-spec-validator OK).
 
+## 비용 가드 — idle 자동 종료 (2026-08-04)
+- **동기**: 워커는 무음까지 OpenAI 로 연속 append 하므로(서버 VAD 계약) 과금이 **발화량이 아니라 송신이 켜져 있는 시간 × 언어 수**에 비례한다. 송신자가 사라졌는데 채널이 열려 있으면 토큰이 계속 나간다.
+- **판정값**: `AiTranslateChannel.floor_idle_seconds()` — 원음 프레임 미수신 경과. `_ai_idle_sweep_loop` 이 60초마다 훑어 `AI_IDLE_CLOSE_SECONDS`(10분) 초과 채널을 DELETE 와 같은 절차로 닫는다(stop → participant remove → close → cascade).
+- **기준 시각은 채널 개설 시각이지 워커 기동 시각이 아니다.** 워커 `started_at` 은 크래시 재시작마다 초기화되므로, 그걸 기준으로 삼으면 재시작을 반복하는 채널이 idle 판정을 영원히 회피한다. 최초 구현이 워커 기준이었고 라이브 확인 중에 잡아 채널(슈퍼바이저) 기준으로 옮겼다.
+- **발행자 없음 vs 무음은 다르다**: 발행자가 붙어 있으면 무음이라도 프레임이 계속 오므로 idle 이 아니다(정상 — 예배 중 침묵을 끊으면 안 되니까). 이 가드가 막는 것은 "송신 종료·미개시인데 채널만 열린" 상태다. 무음 구간 append 게이팅은 별도 과제(실사용 패턴 확인 후).
+- 상수: `AI_IDLE_CLOSE_SECONDS=600`, `AI_IDLE_CHECK_SECONDS=60`.
+
 ## 열린 항목
 - ev211.com Rails 측 송신 코드 레지스트리·manifest `transport` 필드 = 별도 리포(ev211) 작업, 증분 2~3에서.
 - make-before-break 는 단위 테스트 + 로컬 파이프라인까지 검증했고, **55분 실경과 교체는 미검증**(장시간 런 필요).

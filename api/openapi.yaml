@@ -686,6 +686,11 @@ paths:
         **복원**: 서버 재시작 시 열린 AI 채널은 워커를 다시 스폰해 복원한다. 단 비밀번호
         세대가 바뀌었거나 `OPENAI_API_KEY` 가 없으면 슬롯을 반납하고 닫는다.
 
+        **비용 가드(자동 종료)**: 워커는 무음까지 OpenAI 로 연속 전송하므로(서버 VAD 계약)
+        송신이 켜진 시간에 비례해 과금된다. 원음 프레임이 **10분간** 오지 않으면 서버가
+        채널을 자동 종료한다 — 개설만 해두고 방치하거나 송신 종료 후 채널을 안 닫아도
+        토큰이 계속 나가지 않게. 판정값은 status 의 `floor_idle_seconds`.
+
         실패 시: 키 미설정 `503 ai_unavailable`, 슬롯 없음 `409 max_channels_reached`,
         원음 채널이 유효하지 않거나 의존성 순환 `409 invalid_source`, 워커가 제한시간
         내에 접속하지 못하면 채널·lease 를 롤백하고 `503 ai_unavailable`.
@@ -1578,6 +1583,17 @@ components:
           format: date-time
           nullable: true
           description: 마지막 번역 오디오 프레임 발행 시각
+        last_floor_frame_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 마지막으로 원음 프레임을 받은 시각(한 번도 없으면 null)
+        floor_idle_seconds:
+          type: number
+          nullable: true
+          description: |
+            원음이 끊긴 경과 시간(초). 한 번도 못 받았으면 워커 기동 시각부터 센다.
+            임계(기본 10분)를 넘으면 서버가 채널을 자동 종료한다(비용 가드).
         seq:
           type: integer
           description: 발행한 번역 오디오 프레임 수

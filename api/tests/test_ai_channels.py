@@ -23,6 +23,8 @@ class FakeWorker:
 
     session_age_seconds = None
     last_audio_at = None
+    last_floor_frame_at = None
+    started_at = None
     seq = 0
     caption_seq = 0
     renewals = 0
@@ -240,6 +242,80 @@ def test_takeover_rejects_ai_channel(ai_client, send_headers):
     # 인수 거부이므로 워커·lease 는 그대로 살아 있다.
     assert st.ai_channels.has(1) is True
     assert st.db.get_lease(1) is not None
+
+
+# ---- 비용 가드: 원음 끊김 시 idle 자동 종료 ----
+def test_idle_sweep_closes_channel_without_floor(ai_client, send_headers, monkeypatch):
+    import app.main as m
+
+    client, st = ai_client
+    r = client.post("/ai-channels", json={"target_language": "en"}, headers=send_headers)
+    assert r.status_code == 201
+    cid = r.json()["channel_id"]
+
+    # 원음이 임계보다 오래 끊긴 상태를 흉내낸다.
+    monkeypatch.setattr(
+        st.ai_channels,
+        "status",
+        lambda channel_id: {"floor_idle_seconds": m.AI_IDLE_CLOSE_SECONDS + 1},
+    )
+    closed = _run(m._ai_idle_sweep(st))
+
+    assert closed == [cid]
+    assert st.db.get_channel(cid).state == "closed"
+    assert st.db.get_lease(cid) is None  # 슬롯 반납
+    assert st.ai_channels.has(cid) is False
+
+
+def test_idle_sweep_keeps_channel_with_live_floor(ai_client, send_headers, monkeypatch):
+    import app.main as m
+
+    client, st = ai_client
+    r = client.post("/ai-channels", json={"target_language": "en"}, headers=send_headers)
+    cid = r.json()["channel_id"]
+
+    # 원음 프레임이 계속 오는 중이면 닫지 않는다.
+    monkeypatch.setattr(
+        st.ai_channels, "status", lambda channel_id: {"floor_idle_seconds": 1.0}
+    )
+    assert _run(m._ai_idle_sweep(st)) == []
+    assert st.db.get_channel(cid).state == "open"
+    assert st.ai_channels.has(cid) is True
+
+
+def test_idle_sweep_skips_unknown_worker_status(ai_client, send_headers, monkeypatch):
+    """레지스트리에 없는(status=None) 채널은 idle 스윕이 건드리지 않는다(복원·회전 경로 소관)."""
+    import app.main as m
+
+    client, st = ai_client
+    r = client.post("/ai-channels", json={"target_language": "en"}, headers=send_headers)
+    cid = r.json()["channel_id"]
+
+    monkeypatch.setattr(st.ai_channels, "status", lambda channel_id: None)
+    assert _run(m._ai_idle_sweep(st)) == []
+    assert st.db.get_channel(cid).state == "open"
+
+
+def test_floor_idle_counts_from_channel_start_not_worker_restart(monkeypatch):
+    """idle 기준은 채널 개설 시각 — 워커가 크래시 재시작해도 타이머가 리셋되지 않는다."""
+    import app.translate_worker as tw
+    from app.translate_worker import AiTranslateChannel
+
+    channel = AiTranslateChannel(1, "en", worker_factory=lambda: FakeWorker())
+    channel.started_at = 0.0
+    worker = FakeWorker()
+    worker.last_floor_frame_at = None
+    channel._worker = worker
+
+    monkeypatch.setattr(tw.time, "time", lambda: 100.0)
+    # 원음을 한 번도 못 받았으면 채널 개설 시각부터 센다.
+    assert channel.floor_idle_seconds() == 100.0
+    # 워커가 재시작해 자기 기동 시각이 초기화돼도 idle 은 계속 누적된다.
+    worker.started_at = 99.0
+    assert channel.floor_idle_seconds() == 100.0
+    # 프레임을 받으면 그 시각 기준으로 다시 센다.
+    worker.last_floor_frame_at = 90.0
+    assert channel.floor_idle_seconds() == 10.0
 
 
 # ---- HIGH2: 재시작(bootstrap)·송신 비번 회전 시 AI 채널 복원/정리 ----
