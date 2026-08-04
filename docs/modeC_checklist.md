@@ -20,6 +20,10 @@
 - [x] **실 키 E2E로 gpt-realtime-translate 프로토콜 확인 완료** — 영어→한국어 실번역 성공("오늘 예배에 오신 걸 환영합니다"), 이벤트명(`session.output_audio.delta`·`session.output_transcript.delta`·`session.input_transcript.delta`)·세션 스키마(type=translation)·오디오 포맷(24kHz PCM16 mono)·`session.*` 프리픽스 전부 워커 가정과 일치. 계약 잠금 테스트 `test_openai_e2e.py`(RUN_OPENAI_E2E 게이트, CI 기본 skip).
 - [x] **라이브 LiveKit 포함 전체 파이프라인 E2E 통과(2026-08-03)** — 로컬 도커 스택(livekit+field-api)에서 원음 ch-00 publish→워커 구독→번역→ch-01 republish→청취까지 실동작. 하니스 `scripts/ai_live_e2e.py`, 첫 소리 지연 3.1~3.4초, 자막 101패킷, 번역 역전사로 한국어 확인. 클라우드 인프라 불필요했음.
 
+### 비용 가드 ✅ (2026-08-04)
+- [x] AI 채널 idle 자동 종료 — 원음 프레임 10분 미수신 시 자동 close(`_ai_idle_sweep_loop`, 60초 주기). 기준 시각은 워커가 아니라 **채널 개설 시각**(워커 재시작에 리셋되지 않게).
+- [ ] 무음 구간 append 게이팅(발행 중이지만 아무도 말하지 않는 시간의 토큰 절감) — 실사용 패턴 확인 후 판단.
+
 ## 증분 2 — 클라우드 배포 + 무전기 인증 (서버, 인프라 필요)
 - [ ] `docker-compose.cloud.yml` + LiveKit 내장 TURN(TLS 443) + Caddy `field.ev211.com`
 - [ ] 계정 귀속 송신 코드 발급/검증 → publish 토큰 (ev211.com 위임 계약)
