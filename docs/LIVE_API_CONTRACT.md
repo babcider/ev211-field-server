@@ -94,6 +94,16 @@
 - **인앱 스캐너**: 앱은 OS 카메라 외에 인앱 QR 스캐너(mobile_scanner)도 제공 [v1.3 결정 — iOS 배포 타깃 15.5 상향·카메라 권한 문구 수반]. 두 포맷(https·ev211field) 모두 해석.
 - 구 스킴 `ev211field://live?code=...`(수신용)도 앱은 계속 해석한다(하위 호환).
 
+## 6b. field-server 채널 프로비저닝 — 개설자 앱 책임 [v1.4 신설]
+
+라이브 개설 시 선택한 AI 통역 언어의 실채널은 **개설자 앱이 송신 진입 시점에 field-server 에 만든다**(Rails 는 관여하지 않음).
+
+1. Floor 보장: `POST /channels {channel_id: 0, language: <source>, label: "원어(한국어)"}` — 이미 있으면 그대로 사용
+2. AI 채널: live.languages 각각 `POST /ai-channels {target_language: <code>, source_channel: 0}` — 이미 열려 있으면 중복 개설하지 않음(목록 조회 후 결정)
+3. 개설자는 곧장 Floor(ch-00) 송신으로 진입한다 — 수동 채널 선택 화면을 거치지 않는다
+- 인증은 전부 복합 Bearer. idle 가드(10분)로 닫힌 AI 채널은 송신 재진입 시 같은 절차로 재개설된다.
+- 인간 통역사 송신 화면의 언어 선택지는 **라이브의 언어 목록(원어+통역 언어)으로 제한**한다 — 전체 ISO 목록(첫 항목 Abkhazian 폴백) 금지.
+
 ## 7. field-server 측 (참고 — field-server 작업분)
 
 - 송신 계열 인증: `FIELD_SEND_AUTH_MODE=callback` 시 §3 콜백으로 라이브별 비번 검증(5분 긍정 캐시).
