@@ -3,6 +3,8 @@ fastapi==0.139.0
 starlette==1.3.1
 uvicorn[standard]==0.34.0
 livekit-api==1.1.1
+# 라이브 송신 비번 콜백(live_auth.py)이 직접 사용 — 3.14.1 취약점(PYSEC-2026-3545~47) 회피 하한.
+aiohttp==3.14.3
 livekit==1.1.13
 pydantic==2.10.4
 # 모드 C AI 통역 워커가 gpt-realtime-translate WebSocket 에 직결할 때 사용(직접 의존).
