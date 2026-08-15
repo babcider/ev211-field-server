@@ -1,0 +1,20 @@
+# EV211 클라우드 배포 오버레이 — host 오버레이 위에 얹는 3단 구성(Linux 클라우드 전용).
+# 사용:
+#   docker compose -f docker-compose.yml -f docker-compose.host.yml -f docker-compose.cloud.yml \
+#     --env-file .env up -d --build
+# 전제(.env):
+#   - FIELD_NODE_IP = 인스턴스 공인 고정 IP (ICE 후보·클라이언트 광고 주소)
+#   - FIELD_WS_URL  = ws://<공인IP>:7880 (field.ev211.com TLS 전환 후 wss 로 교체)
+# 방화벽(클라우드 보안그룹): 22/80/443/8443/7880-7881 tcp, 3478 udp, 50000-60000 udp.
+# TURN 주의: TURN-over-TLS(443) 는 field.ev211.com DNS 전환 + 공인 인증서 후
+# livekit.cloud.yaml 의 turn 에 domain/tls_port 를 추가해야 활성화된다. 그 전까지 TURN 은 UDP 3478 만.
+services:
+  livekit:
+    # 베이스의 livekit.yaml 대신 클라우드 델타판(내장 TURN 활성)을 템플릿으로 마운트한다.
+    # 같은 target 의 이중 마운트를 피하려고 리스트 전체를 !override 로 대체한다(compose 병합 주의).
+    volumes: !override
+      - ./livekit.cloud.yaml:/etc/livekit.template.yaml:ro
+      - ./scripts/livekit-entrypoint.sh:/livekit-entrypoint.sh:ro
+
+  # field-api·caddy 는 host 오버레이 구성 그대로(브리지 네트워크·루프백 웹훅 경유).
+  # Caddy field.ev211.com 공인 TLS 블록은 DNS 전환 후 Caddyfile 에 추가한다(현재 자체서명 8443 유지).
