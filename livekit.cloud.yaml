@@ -1,0 +1,41 @@
+# EV211 클라우드 SFU 설정 — livekit.yaml(내부망)의 클라우드 델타판. 델타는 turn 섹션뿐이다.
+# 베이스(livekit.yaml)를 수정하면 이 파일에도 같은 변경을 반영할 것(entrypoint 가 파일 단위 치환이라 분리 유지).
+# 사용: docker-compose.cloud.yml 이 이 파일을 /etc/livekit.template.yaml 로 마운트한다.
+port: 7880
+bind_addresses:
+  - ""
+
+rtc:
+  # 클라우드(host 네트워크)는 host 오버레이의 LIVEKIT_RTC_PORT_RANGE_*(50000-60000)가 오버라이드한다.
+  port_range_start: 50000
+  port_range_end: 60000
+  tcp_port: 7881
+  # 클라우드는 NAT 1:1(공인 IP)이므로 --node-ip 로 공인 IP 를 광고한다(compose command). 자동 감지 불필요.
+  use_external_ip: false
+
+# 클라우드 델타: 내장 TURN — UDP 차단·이종 NAT 망 폴백(결정 C).
+# UDP 3478 은 인증서가 필요 없다. TURN/TLS(443 또는 5349)는 field.ev211.com DNS 전환 +
+# 공인 인증서 확보 후 domain/tls_port/external_tls 를 추가한다(자체서명으로는 TLS TURN 불가).
+# relay 는 SFU 와 같은 프로세스 내부이므로 3478 외 추가 포트 개방이 필요 없다.
+turn:
+  enabled: true
+  udp_port: 3478
+
+audio:
+  active_level: 30
+  min_percentile: 15
+  update_interval: 500
+  smooth_intervals: 4
+
+room:
+  auto_create: false
+  empty_timeout: 86400
+
+webhook:
+  api_key: ${LIVEKIT_API_KEY}
+  urls:
+    - ${LIVEKIT_WEBHOOK_URL}
+
+logging:
+  level: info
+  json: false

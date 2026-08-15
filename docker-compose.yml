@@ -64,6 +64,13 @@ services:
       FIELD_SEND_PASSWORD: "${FIELD_SEND_PASSWORD}"
       FIELD_ADMIN_PASSWORD: "${FIELD_ADMIN_PASSWORD}"
       FIELD_NODE_IP: "${FIELD_NODE_IP:-127.0.0.1}"
+      # 모드 C AI 통역 워커가 gpt-realtime-translate WS 에 붙을 때 쓰는 키(선택).
+      # 미설정이면 /ai-channels 개설만 503 으로 거부되고 나머지 기능은 정상 동작한다.
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      # 송신 인증 모드(계약 §7) — 기본 password(내부망). 클라우드 라이브는 callback|both.
+      FIELD_SEND_AUTH_MODE: "${FIELD_SEND_AUTH_MODE:-password}"
+      EV211_API_BASE: "${EV211_API_BASE:-}"
+      FIELD_CALLBACK_SECRET: "${FIELD_CALLBACK_SECRET:-}"
       FIELD_DB_PATH: "/data/field.db"
       FIELD_RECORDINGS_PATH: "/data/recordings"
       MAX_CHANNELS: "${MAX_CHANNELS:-15}"

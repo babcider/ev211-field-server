@@ -13,9 +13,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .config import (
+    AI_IDLE_CHECK_SECONDS,
+    AI_IDLE_CLOSE_SECONDS,
+    AI_READY_TIMEOUT_SECONDS,
+    AI_SUPPORTED_OUTPUT_LANGUAGES,
+    AI_WORKER_STOP_TIMEOUT_SECONDS,
     FLOOR_CHANNEL_ID,
     INTERCOM_MAX_CHANNELS,
-    INTERCOM_MAX_PARTICIPANTS,
     LEASE_JOIN_GRACE_SECONDS,
     LISTENER_HEARTBEAT_TTL_SECONDS,
     PUBLISH_TTL_SECONDS,
@@ -36,8 +40,10 @@ from .tokens import (
     issue_subscribe_token,
     monitor_response,
     publish_response,
+    room_name,
     subscribe_response,
 )
+from .translate_worker import AiWorkerParams
 from .webhook import WebhookProcessor
 
 _BCP47 = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
@@ -64,6 +70,21 @@ class ChannelCreateBody(BaseModel):
 
 class PublishTokenBody(BaseModel):
     channel_id: int = Field(ge=0, le=15)
+
+
+class AiChannelCreateBody(BaseModel):
+    """AI 통역 채널 개설 요청. target_language=번역 목표 언어, source_channel=원음 채널."""
+
+    target_language: str
+    source_channel: int = Field(default=FLOOR_CHANNEL_ID, ge=0, le=15)
+
+    @field_validator("target_language")
+    @classmethod
+    def _lang(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in AI_SUPPORTED_OUTPUT_LANGUAGES:
+            raise ValueError("지원하지 않는 번역 목표 언어입니다.")
+        return v
 
 
 def _clean_display(v: str) -> str:
@@ -175,6 +196,68 @@ class RecordingDeleteBatchBody(BaseModel):
     recording_ids: list[str] = Field(min_length=1, max_length=200)
 
 
+async def _ai_idle_sweep(st: AppState) -> list[int]:
+    """원음이 끊긴 AI 통역 채널을 닫는다(비용 가드). 반환: 닫은 채널 id 목록.
+
+    워커는 무음까지 OpenAI 로 계속 append 하므로, 송신자가 사라졌는데 채널이 열려 있으면
+    토큰이 계속 나간다. `floor_idle_seconds`(원음 프레임 미수신 경과)가 임계를 넘으면
+    DELETE 와 같은 절차로 정지·정리한다.
+
+    락 규약: 채널마다 자기 channel_lock 하나만 잡고(중첩 없음 → 교착 불가), cascade 는
+    락을 놓은 뒤 호출한다(readiness 롤백 경로와 동일).
+    """
+    closed: list[int] = []
+    for ch in st.db.list_open_ai_channels():
+        cid = ch.channel_id
+        status = st.ai_channels.status(cid)
+        if status is None:
+            continue  # 레지스트리에 없는 채널은 복원·회전 경로가 처리한다.
+        idle = status.get("floor_idle_seconds")
+        if idle is None or idle < AI_IDLE_CLOSE_SECONDS:
+            continue
+        async with st.channel_lock(cid):
+            cur = st.db.get_channel(cid)
+            if cur is None or cur.state != "open" or cur.source != "ai":
+                continue  # 대기 중 닫혔거나 슬롯이 재사용됨.
+            lease = st.db.get_lease(cid)
+            await st.ai_channels.stop(cid, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS)
+            if lease is not None:
+                try:
+                    await asyncio.wait_for(
+                        _try_remove(st, lease.identity), timeout=AI_WORKER_STOP_TIMEOUT_SECONDS
+                    )
+                except Exception:  # noqa: BLE001 — 실패해도 DB 는 닫고 webhook reconcile 에 맡긴다
+                    log.warning("ai_idle_close_remove_failed ch=%s", cid)
+            st.db.close_channel(cid)
+            st.on_air.clear_channel(cid)
+            st.record_signal_event(
+                direction="send",
+                event_type="ai_channel_idle_closed",
+                scope="relay",
+                channel_id=cid,
+                room=st.room,
+                subject=lease.identity if lease is not None else "",
+                client_ip="",
+            )
+            closed.append(cid)
+        await _close_dependent_ai_channels(st, cid)
+    if closed:
+        log.info("ai_channels_idle_closed channels=%s idle_s=%s", closed, AI_IDLE_CLOSE_SECONDS)
+    return closed
+
+
+async def _ai_idle_sweep_loop(state: AppState) -> None:
+    """주기적으로 idle AI 채널을 정리한다(일시 오류로 루프가 죽지 않게 흡수)."""
+    while True:
+        await asyncio.sleep(AI_IDLE_CHECK_SECONDS)
+        try:
+            await _ai_idle_sweep(state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — 다음 주기에 재시도
+            log.exception("ai_idle_sweep_failed")
+
+
 async def _signal_log_cleanup_loop(state: AppState) -> None:
     """하루마다 30일 보존 기한을 지난 신호 이벤트를 정리한다."""
     while True:
@@ -210,16 +293,29 @@ def create_app(state: AppState | None = None) -> FastAPI:
         if deleted:
             log.info("purged_signal_events_on_startup count=%s", deleted)
         cleanup_task = asyncio.create_task(_signal_log_cleanup_loop(app.state.field))
+        # 비용 가드: 원음이 끊긴 AI 채널을 주기적으로 닫는다(OpenAI 토큰 유출 차단).
+        idle_task = asyncio.create_task(_ai_idle_sweep_loop(app.state.field))
         try:
             yield
         finally:
-            cleanup_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await cleanup_task
-            await app.state.field.recordings.close()
-            # lifespan 이 생성한 DB 연결만 닫는다(테스트 주입 state 는 픽스처가 관리).
-            if owns_db:
-                app.state.field.db.close()
+            for task in (cleanup_task, idle_task):
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            # AI 워커 정지가 한 워커의 지연에 물려 녹음·DB 정리까지 막지 않도록,
+            # 정지는 (내부적으로 병렬+타임아웃인) close 에 맡기고 예외를 흡수하며,
+            # 녹음·DB 정리는 중첩 finally 로 반드시 수행한다(MED7).
+            try:
+                await app.state.field.ai_channels.close()
+            except Exception:
+                log.exception("ai_channels_close_failed")
+            finally:
+                try:
+                    await app.state.field.recordings.close()
+                finally:
+                    # lifespan 이 생성한 DB 연결만 닫는다(테스트 주입 state 는 픽스처가 관리).
+                    if owns_db:
+                        app.state.field.db.close()
 
     app = FastAPI(title="EV211 field-api", version="0.1.0", lifespan=lifespan)
 
@@ -314,6 +410,21 @@ def _auth_bearer(authorization: str | None, expected: str) -> bool:
     return _secrets.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
 
 
+async def _auth_send(st: AppState, authorization: str | None) -> bool:
+    """송신 계열 인증(계약 §7) — FIELD_SEND_AUTH_MODE 에 따라 분기한다.
+
+    - password|both: 전역 송신 비번 상수시간 비교(기존 동작).
+    - callback|both: 복합 Bearer(`<join_code>:<send_password>`)를 ev211.com 콜백으로 검증
+      (5분 긍정 캐시). 콜백 불가·오류는 False(fail-closed).
+    """
+    mode = st.settings.send_auth_mode
+    if mode in ("password", "both") and _auth_bearer(authorization, st.send_password):
+        return True
+    if st.live_verifier is not None:
+        return await st.live_verifier.verify(_bearer(authorization))
+    return False
+
+
 def _intercom_user_count(participants: list) -> int:
     """관리자 모니터·서버 녹음을 제외한 실제 무전기 사용자 수를 센다."""
     return sum(1 for p in participants if str(getattr(p, "identity", "")).startswith("intercom-"))
@@ -379,6 +490,8 @@ def _channel_view(st: AppState, ch) -> dict:
         "state": ch.state,
         "on_air": st.on_air.is_on_air(ch.channel_id),
         "listeners": listeners,
+        "source": ch.source,
+        "target_language": ch.target_language,
     }
 
 
@@ -425,7 +538,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         ok, rretry = st.publish_rl.check(ip)
         if not ok:
             return _err("rate_limited", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.", 429, rretry)
-        if not _auth_bearer(authorization, st.send_password):
+        if not await _auth_send(st, authorization):
             st.publish_lock.record_failure(ip)
             return _err("unauthorized", "인증이 필요합니다.", 401)
         st.publish_lock.record_success(ip)
@@ -474,7 +587,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         if not ok:
             return _err("rate_limited", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.", 429, rretry)
         # 송신자 비밀번호 외에 관리자 비밀번호로도 허용한다(관리자 메뉴의 채널 삭제).
-        is_send_auth = _auth_bearer(authorization, st.send_password)
+        is_send_auth = await _auth_send(st, authorization)
         is_admin_auth = _auth_bearer(authorization, st.admin_password)
         if not (is_send_auth or is_admin_auth):
             st.publish_lock.record_failure(ip)
@@ -491,7 +604,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         # 회전을 배제한다 — 구 비밀번호 요청이 송신자를 끊는 것을 막는다.
         async with st.rotation_lock:
             # 락 획득 후 인증·초기 비밀번호 게이트 재검증(14차 #2).
-            is_send_auth = _auth_bearer(authorization, st.send_password)
+            is_send_auth = await _auth_send(st, authorization)
             is_admin_auth = _auth_bearer(authorization, st.admin_password)
             if not (is_send_auth or is_admin_auth):
                 return _err("unauthorized", "인증이 필요합니다.", 401)
@@ -505,14 +618,33 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                 ch = st.db.get_channel(channel_id)
                 if ch is None or ch.state != "open":
                     return _err("not_found", "채널을 찾을 수 없습니다.", 404)
-                # fail-open 방지: RemoveParticipant 성공 후에만 상태 전이(lease 해제·종료 표시).
-                lease = st.db.get_lease(channel_id)
-                if lease is not None:
-                    removed = await _try_remove(st, lease.identity)
-                    if not removed:
-                        return _err("livekit_error", "LiveKit 참가자 제거에 실패했습니다. 다시 시도하세요.", 502)
-                st.db.close_channel(channel_id)
-                st.on_air.clear_channel(channel_id)
+                # AI 채널이면 전용 DELETE(/ai-channels)와 **동일 정책**으로 처리한다(회귀2):
+                # 슈퍼바이저·OpenAI WS·감독 태스크를 먼저 정지(HIGH3)하고, LiveKit 참가자
+                # 제거는 best-effort(실패해도 webhook reconcile 이 정리), DB 행은 **항상 close**.
+                # 사람 채널처럼 502 로 되돌려 open 고아 채널을 남기지 않는다(두 경로 일관).
+                if ch.source == "ai":
+                    # bounded stop — aclose 고착 시 요청이 무한 대기하지 않고 _leaked 로 수거된다.
+                    await st.ai_channels.stop(
+                        channel_id, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS
+                    )
+                    lease = st.db.get_lease(channel_id)
+                    if lease is not None:
+                        await _try_remove(st, lease.identity)
+                    st.db.close_channel(channel_id)
+                    st.on_air.clear_channel(channel_id)
+                else:
+                    # 사람 채널: fail-open 방지 — RemoveParticipant 성공 후에만 상태 전이.
+                    lease = st.db.get_lease(channel_id)
+                    if lease is not None:
+                        removed = await _try_remove(st, lease.identity)
+                        if not removed:
+                            return _err("livekit_error", "LiveKit 참가자 제거에 실패했습니다. 다시 시도하세요.", 502)
+                    st.db.close_channel(channel_id)
+                    st.on_air.clear_channel(channel_id)
+            # 부모 channel_lock 해제 후(rotation_lock 아래) 이 채널을 원음으로 구독하던 종속 AI
+            # 채널을 cascade 종료한다(결함4·C). cascade 는 종속마다 자기 channel_lock 을 오름차순
+            # 으로 하나씩 잡으므로 부모 락과 겹치지 않아 교착이 없다.
+            await _close_dependent_ai_channels(st, channel_id)
         return Response(status_code=204)
 
     # ---- subscribe tokens ----
@@ -588,7 +720,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         ok, rretry = st.publish_rl.check(ip)
         if not ok:
             return _err("rate_limited", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.", 429, rretry)
-        if not _auth_bearer(authorization, st.send_password):
+        if not await _auth_send(st, authorization):
             st.publish_lock.record_failure(ip)
             return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
         st.publish_lock.record_success(ip)
@@ -601,7 +733,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         # 배제한다. 락 순서는 회전 락 → 채널 락(역순 없음 → 데드락 불가).
         async with st.rotation_lock:
             # 락 획득 후 인증 재검증: 대기 중 송신자 비밀번호가 회전되었으면 거부한다.
-            if not _auth_bearer(authorization, st.send_password):
+            if not await _auth_send(st, authorization):
                 return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
             # #2: 채널 락으로 lease 발급 임계 구역(존재 확인·present 조회·acquire)을 직렬화한다 —
             # close/takeover 의 RemoveParticipant~상태 전이 도중에 새 lease 가 발급되지 않게 한다.
@@ -610,6 +742,9 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                 ch = st.db.get_channel(body.channel_id)
                 if ch is None or ch.state != "open":
                     return _err("not_found", "채널을 찾을 수 없습니다.", 404)
+                # AI 통역 채널은 서버 워커가 전담 송신한다 — 사람 송신 발급을 거부한다.
+                if ch.source == "ai":
+                    return _err("channel_busy", "AI 통역 채널은 사람이 송신할 수 없습니다.", 409)
 
                 # 룸이 사라졌으면 재생성(모든 토큰 발급 경로에서 룸 존재 보장).
                 await st.ensure_room()
@@ -671,14 +806,14 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         ok, rretry = st.publish_rl.check(ip)
         if not ok:
             return _err("rate_limited", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.", 429, rretry)
-        if not _auth_bearer(authorization, st.send_password):
+        if not await _auth_send(st, authorization):
             st.publish_lock.record_failure(ip)
             return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
         st.publish_lock.record_success(ip)
 
         # 회전 락: 세대 회전 중 구세대 인터컴 룸 재생성·구세대 기준 발급을 막는다.
         async with st.rotation_lock:
-            if not _auth_bearer(authorization, st.send_password):
+            if not await _auth_send(st, authorization):
                 return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
             try:
                 await st.ensure_intercom_room()
@@ -686,10 +821,10 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
             except Exception:
                 # 조회 실패를 0명으로 간주하면 상한이 우회되므로 발급을 거부한다(fail-closed).
                 return _err("livekit_error", "인터컴 상태 확인에 실패했습니다. 다시 시도하세요.", 502)
-            if _intercom_user_count(participants) >= INTERCOM_MAX_PARTICIPANTS:
+            if _intercom_user_count(participants) >= st.settings.intercom_max:
                 return _err(
                     "intercom_full",
-                    f"인터컴 정원({INTERCOM_MAX_PARTICIPANTS}명)이 가득 찼습니다.",
+                    f"인터컴 정원({st.settings.intercom_max}명)이 가득 찼습니다.",
                     409,
                 )
             token, identity, track = issue_intercom_token(
@@ -710,7 +845,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
             return intercom_response(token, st.generation, st.settings.ws_url, identity, track)
 
     # ---- intercom channels (무전기 채널) ----
-    def _intercom_auth(request: Request, authorization: str | None):
+    async def _intercom_auth(request: Request, authorization: str | None):
         """무전기 채널 API 공통 가드: https 강제 + 잠금/율제한 + 송신자 비밀번호 인증.
 
         통과 시 None, 실패 시 오류 응답을 반환한다. 송신 계열과 동일한 보호를 쓴다.
@@ -726,7 +861,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         ok, rretry = st.publish_rl.check(ip)
         if not ok:
             return _err("rate_limited", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.", 429, rretry)
-        if not _auth_bearer(authorization, st.send_password):
+        if not await _auth_send(st, authorization):
             st.publish_lock.record_failure(ip)
             return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
         st.publish_lock.record_success(ip)
@@ -745,7 +880,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
     ):
         """무전기 채널 목록 — 송신자 비밀번호 인증(무전기 진입 검증 겸용)."""
         st = _st(request)
-        denied = _intercom_auth(request, authorization)
+        denied = await _intercom_auth(request, authorization)
         if denied is not None:
             return denied
         channels = [_intercom_channel_view(st, r) for r in st.db.list_intercom_channels()]
@@ -759,11 +894,11 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
     ):
         """무전기 채널 개설 — 이름(필수)·비밀번호(선택). 가장 낮은 빈 슬롯(0~7)에 배정."""
         st = _st(request)
-        denied = _intercom_auth(request, authorization)
+        denied = await _intercom_auth(request, authorization)
         if denied is not None:
             return denied
         async with st.rotation_lock:
-            if not _auth_bearer(authorization, st.send_password):
+            if not await _auth_send(st, authorization):
                 return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
             cid = st.db.lowest_free_intercom_slot(INTERCOM_MAX_CHANNELS)
             if cid is None:
@@ -794,7 +929,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         import asyncio
 
         st = _st(request)
-        denied = _intercom_auth(request, authorization)
+        denied = await _intercom_auth(request, authorization)
         if denied is not None:
             return denied
 
@@ -830,7 +965,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
 
         # ── 토큰 발급(회전 락으로 세대 정합 보장, 비번 검증은 위에서 완료) ──
         async with st.rotation_lock:
-            if not _auth_bearer(authorization, st.send_password):
+            if not await _auth_send(st, authorization):
                 return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
             # 회전 대기 사이 채널이 폐기(세대 회전)됐을 수 있으므로 재확인 + 검증 시점과
             # 세대·비번 해시가 동일한지 대조한다(24차 TOCTOU). 불일치면 발급을 거부한다.
@@ -845,10 +980,10 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                 participants = await st.livekit.list_participants(room)
             except Exception:
                 return _err("livekit_error", "채널 상태 확인에 실패했습니다. 다시 시도하세요.", 502)
-            if _intercom_user_count(participants) >= INTERCOM_MAX_PARTICIPANTS:
+            if _intercom_user_count(participants) >= st.settings.intercom_max:
                 return _err(
                     "intercom_full",
-                    f"채널 정원({INTERCOM_MAX_PARTICIPANTS}명)이 가득 찼습니다.",
+                    f"채널 정원({st.settings.intercom_max}명)이 가득 찼습니다.",
                     409,
                 )
             token, identity, track = issue_intercom_token(
@@ -872,6 +1007,195 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                 token, st.generation, st.settings.ws_url, identity, track,
                 room=room, channel_id=channel_id,
             )
+
+    # ---- AI 통역 채널(모드 C) ----
+    def _ai_channel_view(st: AppState, channel_id: int) -> dict:
+        ch = st.db.get_channel(channel_id)
+        return {
+            "channel_id": channel_id,
+            "target_language": ch.target_language if ch else None,
+            "source": ch.source if ch else None,
+            "state": ch.state if ch else None,
+            "track_name": f"ch-{channel_id:02d}",
+            "room": st.room,
+            "worker": st.ai_channels.status(channel_id),
+        }
+
+    @app.post("/ai-channels", status_code=201)
+    async def create_ai_channel(
+        request: Request,
+        body: AiChannelCreateBody = Body(...),
+        authorization: str | None = Header(default=None),
+    ):
+        """AI 통역 채널을 개설한다 — 채널 슬롯 확보 + lease 발급 + 번역 워커 스폰.
+
+        워커는 원음 채널(source_channel, 기본 Floor ch-00)을 구독해 목표 언어로 번역한
+        오디오를 자신의 ch-NN 으로 발행한다. 사람 송신과 달리 lease 소유자가 서버 워커라,
+        webhook 강제(speaker identity·트랙명·lease 검증)를 그대로 통과한다.
+        """
+        st = _st(request)
+        denied = await _intercom_auth(request, authorization)
+        if denied is not None:
+            return denied
+        if not st.settings.openai_api_key:
+            return _err("ai_unavailable", "OpenAI 키가 설정되지 않아 AI 통역을 사용할 수 없습니다.", 503)
+        ip = _ip(request, st)
+        async with st.rotation_lock:
+            if not await _auth_send(st, authorization):
+                return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
+            cid = st.db.lowest_free_general_slot(st.settings.max_channels)
+            if cid is None:
+                return _err("max_channels_reached", f"최대 채널 수({st.settings.max_channels})에 도달했습니다.", 409)
+            async with st.channel_lock(cid):
+                # 원음 채널 검증(MED9): 자기 트랙 구독 금지 + 닫힌 원음 채널 구독 금지.
+                # Floor(ch-00)는 항상 존재하는 원음이라 존재·상태 검사에서 예외로 둔다.
+                if body.source_channel == cid:
+                    return _err("invalid_source", "원음 채널과 출력 채널이 같을 수 없습니다.", 409)
+                if body.source_channel != FLOOR_CHANNEL_ID:
+                    src = st.db.get_channel(body.source_channel)
+                    if src is None or src.state != "open":
+                        return _err("invalid_source", "원음 채널이 열린 오디오 채널이 아닙니다.", 409)
+                # 의존성 순환 검사(결함4): 원음이 AI 채널이면 그 원음 체인을 따라가 새 출력
+                # slot 으로 되돌아오면(1↔2 등) 번역 피드백이 되므로 거부한다.
+                if _ai_source_cycle(st, cid, body.source_channel):
+                    return _err("invalid_source", "원음 채널 의존성이 순환합니다.", 409)
+                await st.ensure_room()
+                try:
+                    ch = st.db.create_channel(
+                        cid,
+                        body.target_language,
+                        f"AI: {body.target_language}",
+                        source="ai",
+                        target_language=body.target_language,
+                        source_channel=body.source_channel,
+                    )
+                except ChannelExists:
+                    # 슬롯 선택과 생성이 한 트랜잭션이 아니라 동시 요청이 같은 최저 슬롯을
+                    # 잡는 경쟁 — 500 대신 409 로 변환한다(MED11).
+                    return _err("max_channels_reached", "채널 슬롯 경합이 발생했습니다. 다시 시도하세요.", 409)
+                nonce = new_nonce()
+                acquired, identity = st.db.acquire_lease(
+                    cid, ch.epoch, st.generation, nonce, PUBLISH_TTL_SECONDS, LEASE_JOIN_GRACE_SECONDS
+                )
+                if not acquired:
+                    # 방금 개설한 슬롯을 잡지 못하는 경쟁은 이례적 — 채널을 닫아 롤백한다.
+                    st.db.close_channel(cid)
+                    return _err("channel_busy", "채널 점유에 실패했습니다. 다시 시도하세요.", 409)
+                token = issue_publish_token(
+                    st.settings.livekit_api_key, st.settings.livekit_api_secret, st.generation, identity,
+                    can_publish_data=True,  # 워커가 자막(원문·번역)을 data 패킷으로 발행한다.
+                )
+                params = AiWorkerParams(
+                    channel_id=cid,
+                    target_language=body.target_language,
+                    rtc_url=st.settings.livekit_rtc_url,
+                    token=token,
+                    room=room_name(st.generation),
+                    publish_track=f"ch-{cid:02d}",
+                    subscribe_track=f"ch-{body.source_channel:02d}",
+                )
+                # 매 (재)접속 시 fresh publish 토큰(+lease 재획득)을 주는 프로바이더 주입(HIGH1).
+                # 재시작 복원 경로(AppState.restore_ai_channels)와 동일한 프로바이더를 쓴다.
+                channel = st.ai_channels.start(params, token_provider=st.ai_token_provider(cid))
+                st.record_signal_event(
+                    direction="send",
+                    event_type="ai_channel_created",
+                    scope="relay",
+                    channel_id=cid,
+                    room=st.room,
+                    subject=identity,
+                    client_ip=ip,
+                )
+                view = _ai_channel_view(st, cid)
+                view["identity"] = identity
+                view["source_channel"] = body.source_channel
+                view["generation"] = st.generation
+
+        # 락 밖에서 최초 접속 준비를 기다린다(전체 서버를 막지 않기 위해) — 제한시간 내
+        # 실제 접속(LiveKit+OpenAI)이 확인되지 않으면 워커·lease·채널을 롤백하고 503(MED8).
+        try:
+            await asyncio.wait_for(channel.ready.wait(), timeout=AI_READY_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            rolled_back = False
+            async with st.channel_lock(cid):
+                # 회귀1: 대기 중 이 슬롯이 삭제→재개설(사람 채널 등)로 재사용됐으면 엉뚱한
+                # 채널을 닫으면 안 된다. '내가 시작한 바로 그 슈퍼바이저 채널'이 여전히 이
+                # 슬롯의 등록 채널이고 DB 행도 여전히 AI 채널일 때만 롤백한다. 슬롯 재사용은
+                # 반드시 DELETE(레지스트리 pop)를 거치므로 객체 동일성으로 안전하게 판정된다.
+                cur = st.db.get_channel(cid)
+                if st.ai_channels.get(cid) is channel and cur is not None and cur.source == "ai":
+                    await st.ai_channels.stop(cid, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS)
+                    # 결함2: DELETE 경로와 동일하게 잔존 participant·ch-NN 트랙을 bounded
+                    # best-effort 로 제거한다(LiveKit 접속·발행까지 성공했으나 OpenAI 타임아웃/
+                    # room.disconnect 고착 시 남을 수 있음). 실패해도 DB 는 닫고 로그로 기록한다.
+                    lease = st.db.get_lease(cid)
+                    if lease is not None:
+                        try:
+                            await asyncio.wait_for(
+                                _try_remove(st, lease.identity),
+                                timeout=AI_WORKER_STOP_TIMEOUT_SECONDS,
+                            )
+                        except Exception:  # noqa: BLE001 — webhook reconcile 이 후속 정리
+                            log.warning("ai_readiness_rollback_remove_failed ch=%s", cid)
+                    st.db.close_channel(cid)
+                    st.on_air.clear_channel(cid)
+                    rolled_back = True
+                else:
+                    log.info("ai_readiness_rollback_skipped_slot_reused ch=%s", cid)
+            # 결함4·B: 롤백으로 이 AI 채널(원음)을 닫았으면, 이를 구독하던 종속 AI 채널도
+            # DELETE 경로와 동일하게 cascade 종료한다(부모 channel_lock 해제 후 호출 — cascade 가
+            # 종속마다 자기 channel_lock 을 오름차순으로 잡아 교착·엉뚱한 채널 close 를 막는다).
+            if rolled_back:
+                await _close_dependent_ai_channels(st, cid)
+            return _err("ai_unavailable", "AI 통역 워커가 제한시간 내 연결에 실패했습니다.", 503)
+        return view
+
+    @app.delete("/ai-channels/{channel_id}", status_code=204)
+    async def delete_ai_channel(
+        request: Request,
+        channel_id: int = Path(ge=0, le=15),
+        authorization: str | None = Header(default=None),
+    ):
+        """AI 통역 채널을 종료한다 — 워커 정지(server-first) 후 채널을 닫는다."""
+        st = _st(request)
+        denied = await _intercom_auth(request, authorization)
+        if denied is not None:
+            return denied
+        async with st.rotation_lock:
+            if not await _auth_send(st, authorization):
+                return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
+            async with st.channel_lock(channel_id):
+                ch = st.db.get_channel(channel_id)
+                if ch is None or ch.state != "open" or ch.source != "ai":
+                    return _err("not_found", "AI 통역 채널을 찾을 수 없습니다.", 404)
+                # server-first: 워커를 먼저 정지(자기 participant 를 disconnect)한 뒤 상태를 닫는다.
+                # bounded stop — aclose 고착 시 무한 대기 없이 _leaked 로 수거된다.
+                await st.ai_channels.stop(channel_id, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS)
+                lease = st.db.get_lease(channel_id)
+                if lease is not None:
+                    # 워커가 이미 나갔으면 not-found → 성공 취급. 잔여 participant 만 정리(best-effort).
+                    await _try_remove(st, lease.identity)
+                st.db.close_channel(channel_id)
+                st.on_air.clear_channel(channel_id)
+            # 부모 channel_lock 해제 후(rotation_lock 아래) 종속 AI 채널 cascade 종료(결함4·C).
+            await _close_dependent_ai_channels(st, channel_id)
+        return Response(status_code=204)
+
+    @app.get("/ai-channels/{channel_id}/status")
+    async def get_ai_channel_status(
+        request: Request,
+        channel_id: int = Path(ge=0, le=15),
+        authorization: str | None = Header(default=None),
+    ):
+        """AI 통역 채널의 워커 헬스(실행 여부·재시작 수·세션 나이·마지막 오디오 시각)를 반환한다."""
+        st = _st(request)
+        denied = await _intercom_auth(request, authorization)
+        if denied is not None:
+            return denied
+        ch = st.db.get_channel(channel_id)
+        if ch is None or ch.source != "ai":
+            return _err("not_found", "AI 통역 채널을 찾을 수 없습니다.", 404)
+        return _ai_channel_view(st, channel_id)
 
     # ---- status ----
     @app.get("/status")
@@ -995,6 +1319,11 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                 ch = st.db.get_channel(channel_id)
                 if ch is None or ch.state != "open":
                     return _err("not_found", "채널을 찾을 수 없습니다.", 404)
+                # AI 통역 채널은 서버 워커가 lease 소유자다 — 사람 takeover 로 lease 를
+                # 덮어쓰면 워커 lease 와 사람 lease 가 경합한다. 인수를 거부한다(HIGH4).
+                # (의도적 human 전환 경로는 이번 범위 밖.)
+                if ch.source == "ai":
+                    return _err("channel_busy", "AI 통역 채널은 관리자 인수 대상이 아닙니다. 먼저 AI 채널을 종료하세요.", 409)
 
                 # 룸 존재 보장(모든 토큰 발급 경로).
                 await st.ensure_room()
@@ -1374,6 +1703,86 @@ def _channel_full(st: AppState, ch) -> dict:
     view = _channel_view(st, ch)
     view["created_at"] = _dt.datetime.fromtimestamp(ch.created_at, tz=_dt.timezone.utc).isoformat()
     return view
+
+
+def _ai_source_cycle(st: AppState, output_cid: int, source_channel: int) -> bool:
+    """AI 채널 개설 시 원음 의존성 체인이 새 출력 slot 으로 되돌아오는지(순환) 검사한다(결함4).
+
+    source_channel 이 AI 채널이면 그 원음(source_channel)으로 계속 따라가며, 도중에 출력
+    slot(output_cid)을 만나면 순환이다(예: ch1→ch2, ch2→ch1). Floor(ch-00)·사람 채널·
+    닫힘/없음은 체인 종단이다. 기존 데이터에 이미 순환이 있어도 visited 로 무한루프를 막는다.
+    """
+    cur: int | None = source_channel
+    seen: set[int] = set()
+    while cur is not None and cur != FLOOR_CHANNEL_ID:
+        if cur == output_cid:
+            return True
+        if cur in seen:
+            return True
+        seen.add(cur)
+        ch = st.db.get_channel(cur)
+        if ch is None or ch.state != "open" or ch.source != "ai":
+            return False  # 사람/닫힘/없음 = 체인 종단(순환 아님)
+        cur = ch.source_channel
+    return False
+
+
+async def _close_dependent_ai_channels(st: AppState, source_id: int) -> list[int]:
+    """source_id 를 (직·간접) 원음으로 구독하는 열린 AI 채널을 정지·close 한다(결함4 cascade).
+
+    원음 채널이 삭제·종료되면 그것을 구독하던 AI 워커는 슬롯 재사용 시 새 채널 오디오를
+    계속 번역(번역 피드백·비용 폭주)하므로 종속 AI 채널을 함께 종료한다. 종속의 종속(체인)도
+    BFS 로 따라간다.
+
+    동시성 가드(C): 호출부는 **어떤 channel_lock 도 보유하지 않은 상태**로 부른다(부모
+    channel_lock 은 이미 해제됨). 각 종속 cid 는 **cid 오름차순으로 자기 channel_lock 을 하나씩
+    잡고**(한 번에 하나만 → 단일 락 불변식 유지, 교착 없음), 잠금 안에서 DB 행을 재조회해
+    여전히 source=='ai' 이고 방금 닫은 원음(frontier)을 구독 중일 때만 stop+remove+close 한다.
+    그 사이 슬롯이 재사용됐으면 skip+로그(readiness 롤백·재개설과 인터리브 방어).
+    """
+    closed: list[int] = []
+    seen: set[int] = set()
+    frontier = {source_id}
+    while frontier:
+        # 이번 레벨에서 방금 닫은 원음들을 구독하는 종속 후보를 오름차순으로 수집.
+        candidates = sorted(
+            {
+                cid
+                for src in frontier
+                for cid in st.db.list_open_ai_channels_by_source(src)
+                if cid not in seen
+            }
+        )
+        nxt: set[int] = set()
+        for cid in candidates:
+            async with st.channel_lock(cid):
+                ch = st.db.get_channel(cid)
+                # 슬롯 재사용 방어: 여전히 이 원음(frontier)을 구독하는 열린 AI 채널일 때만 닫는다.
+                if (
+                    ch is None
+                    or ch.state != "open"
+                    or ch.source != "ai"
+                    or ch.source_channel not in frontier
+                ):
+                    log.info("ai_cascade_skip_slot_reused ch=%s", cid)
+                    continue
+                await st.ai_channels.stop(cid, timeout=AI_WORKER_STOP_TIMEOUT_SECONDS)
+                lease = st.db.get_lease(cid)
+                if lease is not None:
+                    try:
+                        await asyncio.wait_for(
+                            _try_remove(st, lease.identity),
+                            timeout=AI_WORKER_STOP_TIMEOUT_SECONDS,
+                        )
+                    except Exception:  # noqa: BLE001 — 실패해도 DB 는 닫고 후속은 webhook reconcile
+                        log.warning("ai_cascade_remove_failed ch=%s", cid)
+                st.db.close_channel(cid)
+                st.on_air.clear_channel(cid)
+                closed.append(cid)
+                seen.add(cid)
+                nxt.add(cid)
+        frontier = nxt
+    return closed
 
 
 async def _publisher_present(st: AppState, identity: str) -> bool:

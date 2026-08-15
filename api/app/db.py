@@ -23,6 +23,9 @@ class ChannelRow:
     state: str  # open | closed
     epoch: int
     created_at: float
+    source: str = "human"  # 'human'(사람 송신) | 'ai'(AI 통역 워커 송신)
+    target_language: str | None = None  # AI 채널의 번역 목표 언어(사람 채널은 None)
+    source_channel: int | None = None  # AI 채널이 구독하는 원음 채널 id(사람 채널은 None)
 
 
 @dataclass
@@ -82,6 +85,7 @@ class Database:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+        self._migrate()
 
     def _query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         """락으로 보호되는 읽기 헬퍼."""
@@ -183,6 +187,36 @@ class Database:
             """
         )
         c.commit()
+
+    def _migrate(self) -> None:
+        """기존 배포 DB 를 파괴 없이 확장한다(모드 C AI 통역).
+
+        기존 CREATE TABLE 문·데이터는 건드리지 않고, channels 에 없는 컬럼만
+        방어적으로 ADD COLUMN 한다. 존재 확인 후 ADD 하되, 다중 프로세스 동시 기동으로
+        확인~ADD 사이에 다른 프로세스가 먼저 추가하면 `duplicate column` 으로 기동이
+        깨지므로 그 오류만 안전하게 흡수한다(멱등 보장).
+        """
+        self._add_column_if_missing("channels", "source", "TEXT NOT NULL DEFAULT 'human'")
+        self._add_column_if_missing("channels", "target_language", "TEXT")
+        # AI 채널의 원음 채널 의존성 영속(결함4) — 원음 삭제 시 종속 AI 채널 cascade 판정용.
+        self._add_column_if_missing("channels", "source_channel", "INTEGER")
+
+    def _add_column_if_missing(self, table: str, column: str, decl: str) -> None:
+        """table 에 column 이 없으면 ADD COLUMN 한다(동시 기동 경합에 안전).
+
+        존재 확인 후에도 다른 프로세스가 먼저 ADD 하면 sqlite 가 `duplicate column name`
+        OperationalError 를 던진다 — 이 경우만 성공으로 간주하고, 그 외 오류는 재-raise 한다.
+        """
+        cols = {r["name"] for r in self._query(f"PRAGMA table_info({table})")}
+        if column in cols:
+            return
+        try:
+            with self._tx():
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                return  # 다른 프로세스가 먼저 추가함 — 멱등 성공.
+            raise
 
     # ---- 송수신 신호 이벤트 ----
     def record_signal_event(
@@ -345,6 +379,7 @@ class Database:
 
     @staticmethod
     def _to_channel(r: sqlite3.Row) -> ChannelRow:
+        keys = r.keys()
         return ChannelRow(
             channel_id=r["channel_id"],
             track_name=r["track_name"],
@@ -353,6 +388,14 @@ class Database:
             state=r["state"],
             epoch=r["epoch"],
             created_at=r["created_at"],
+            # 마이그레이션으로 추가된 컬럼(구 DB 조회 경로 방어 — 항상 존재하지만 안전하게).
+            source=r["source"] if "source" in keys else "human",
+            target_language=r["target_language"] if "target_language" in keys else None,
+            source_channel=(
+                r["source_channel"]
+                if "source_channel" in keys and r["source_channel"] is not None
+                else None
+            ),
         )
 
     def count_open_general_channels(self) -> int:
@@ -371,8 +414,21 @@ class Database:
                 return cid
         return None
 
-    def create_channel(self, channel_id: int, language: str, label: str) -> ChannelRow:
-        """채널 슬롯을 개설한다(원자적). 이미 open 이면 IntegrityError(호출부에서 409 처리)."""
+    def create_channel(
+        self,
+        channel_id: int,
+        language: str,
+        label: str,
+        source: str = "human",
+        target_language: str | None = None,
+        source_channel: int | None = None,
+    ) -> ChannelRow:
+        """채널 슬롯을 개설한다(원자적). 이미 open 이면 IntegrityError(호출부에서 409 처리).
+
+        source='ai' + target_language 로 개설하면 서버측 AI 통역 워커가 송신하는
+        채널이 된다(사람 송신은 publish 엔드포인트에서 거부된다). source_channel 은 AI
+        채널이 구독하는 원음 채널 id 로, 원음 삭제 시 cascade 판정에 쓴다(결함4).
+        """
         track = f"ch-{channel_id:02d}"
         now = _now()
         with self._tx():
@@ -383,11 +439,15 @@ class Database:
                 raise ChannelExists(channel_id)
             # closed 였던 채널은 다시 open 으로(epoch 유지), 없으면 새로 삽입.
             self._conn.execute(
-                "INSERT INTO channels (channel_id, track_name, language, label, state, epoch, created_at) "
-                "VALUES (?, ?, ?, ?, 'open', 1, ?) "
+                "INSERT INTO channels "
+                "(channel_id, track_name, language, label, state, epoch, created_at, source, "
+                "target_language, source_channel) "
+                "VALUES (?, ?, ?, ?, 'open', 1, ?, ?, ?, ?) "
                 "ON CONFLICT(channel_id) DO UPDATE SET "
-                "language=excluded.language, label=excluded.label, state='open', created_at=excluded.created_at",
-                (channel_id, track, language, label, now),
+                "language=excluded.language, label=excluded.label, state='open', "
+                "created_at=excluded.created_at, source=excluded.source, "
+                "target_language=excluded.target_language, source_channel=excluded.source_channel",
+                (channel_id, track, language, label, now, source, target_language, source_channel),
             )
         return self.get_channel(channel_id)  # type: ignore[return-value]
 
@@ -395,6 +455,43 @@ class Database:
         with self._tx():
             self._conn.execute("UPDATE channels SET state='closed' WHERE channel_id=?", (channel_id,))
             self._conn.execute("DELETE FROM leases WHERE channel_id=?", (channel_id,))
+
+    def close_open_ai_channels(self) -> list[int]:
+        """열린 AI 채널(source='ai', state='open')을 원자적으로 닫고 채널 id 목록을 반환한다(HIGH2).
+
+        워커 레지스트리는 인메모리라 재시작·송신 비번 회전 시 사라지므로, 남은 open AI
+        채널 행은 워커 없는 고아가 되어 슬롯을 영구 점유한다. 복원 대신 정리한다(자동
+        재스폰은 후속). 해당 채널 lease 도 함께 삭제해 슬롯을 즉시 반납한다.
+        """
+        with self._tx():
+            rows = self._conn.execute(
+                "SELECT channel_id FROM channels WHERE source='ai' AND state='open'"
+            ).fetchall()
+            ids = [int(r["channel_id"]) for r in rows]
+            if ids:
+                self._conn.execute(
+                    "UPDATE channels SET state='closed' WHERE source='ai' AND state='open'"
+                )
+                self._conn.executemany(
+                    "DELETE FROM leases WHERE channel_id=?", [(i,) for i in ids]
+                )
+        return ids
+
+    def list_open_ai_channels(self) -> list[ChannelRow]:
+        """열린 AI 통역 채널 행 전체를 반환한다(재시작 후 워커 복원용, read-only)."""
+        rows = self._query(
+            "SELECT * FROM channels WHERE source='ai' AND state='open' ORDER BY channel_id"
+        )
+        return [self._to_channel(r) for r in rows]
+
+    def list_open_ai_channels_by_source(self, source_channel: int) -> list[int]:
+        """source_channel 을 원음으로 구독하는 열린 AI 채널 id 목록을 반환한다(결함4 cascade, read-only)."""
+        rows = self._query(
+            "SELECT channel_id FROM channels "
+            "WHERE source='ai' AND state='open' AND source_channel=?",
+            (source_channel,),
+        )
+        return [int(r["channel_id"]) for r in rows]
 
     # ---- lease(원자적 점유) ----
     def get_lease(self, channel_id: int) -> LeaseRow | None:

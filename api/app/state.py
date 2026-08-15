@@ -10,21 +10,32 @@ from .config import (
     ADMIN_LOCK_SECONDS,
     ADMIN_RL_PER_MINUTE,
     HEARTBEAT_RL_PER_MINUTE,
-    INTERCOM_MAX_PARTICIPANTS,
     PUBLISH_FAIL_LIMIT,
     PUBLISH_LOCK_SECONDS,
     PUBLISH_RL_PER_MINUTE,
+    PUBLISH_TTL_SECONDS,
     ROOM_EMPTY_TIMEOUT_SECONDS,
     SUBSCRIBE_RL_PER_MINUTE,
     Settings,
 )
-from .db import Database
+from .live_auth import LiveSendVerifier
+from .db import Database, new_nonce
 from .identity import parse_speaker_identity
 from .livekit_client import LiveKitClient
 from .monitor import OnAirTracker
 from .rate_limit import Blocklist, FailureLock, RateLimiter
 from .recording import RecordingManager
-from .tokens import intercom_channel_room_name, intercom_room_name, room_name
+from .tokens import (
+    intercom_channel_room_name,
+    intercom_room_name,
+    issue_publish_token,
+    room_name,
+)
+from .translate_worker import (
+    AiChannelManager,
+    AiWorkerParams,
+    build_default_ai_worker_factory,
+)
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +76,14 @@ class AppState:
         self.send_password: str = db.get_setting("send_password") or settings.send_password
         self.admin_password: str = db.get_setting("admin_password") or settings.admin_password
 
+        # 라이브별 송신 비번 콜백 검증기(계약 §7) — callback|both 모드에서만 생성.
+        # 테스트에서는 이 속성을 Fake 로 교체한다.
+        self.live_verifier: LiveSendVerifier | None = (
+            LiveSendVerifier(settings.ev211_api_base, settings.field_callback_secret)
+            if settings.send_auth_mode in ("callback", "both")
+            else None
+        )
+
         # 채널별 asyncio.Lock — close/takeover/publish-token 발급을 채널 단위로 직렬화한다(#2).
         # RemoveParticipant await 와 DB 상태 전이(lease 해제·epoch 증가·재획득) 사이에
         # 다른 코루틴의 새 lease 발급이 끼어들지 못하게 한다. 락 획득 순서는 "채널 락 1개"
@@ -82,6 +101,10 @@ class AppState:
         #   실행 수를 제한해 다IP 동시 요청의 CPU/메모리 폭주를 막는다(23차 신규).
         self._intercom_pw_key_locks: dict[str, asyncio.Lock] = {}
         self.intercom_scrypt_sem = asyncio.Semaphore(2)
+
+        # 모드 C AI 통역 채널 슈퍼바이저 레지스트리. 운영 기본 워커 팩토리(실 OpenAI WS +
+        # rtc.Room)를 주입한다. 테스트는 이 속성을 fake 워커 팩토리 매니저로 교체한다.
+        self.ai_channels = AiChannelManager(build_default_ai_worker_factory(settings))
 
     def intercom_pw_key_lock(self, key: str) -> asyncio.Lock:
         """채널 비번 시도(IP:channel_id) 키별 직렬화 락(없으면 생성)."""
@@ -183,8 +206,8 @@ class AppState:
             await self.livekit.create_room(
                 self.intercom_room,
                 empty_timeout=ROOM_EMPTY_TIMEOUT_SECONDS,
-                # 사용자 8명 + 관리자 모니터 1명 + 서버 녹음 1명.
-                max_participants=INTERCOM_MAX_PARTICIPANTS + 2,
+                # 사용자 상한(settings.intercom_max) + 관리자 모니터 1명 + 서버 녹음 1명.
+                max_participants=self.settings.intercom_max + 2,
             )
 
     def intercom_channel_room(self, channel_id: int) -> str:
@@ -204,8 +227,8 @@ class AppState:
             await self.livekit.create_room(
                 room,
                 empty_timeout=ROOM_EMPTY_TIMEOUT_SECONDS,
-                # 사용자 8명 + 관리자 모니터 1명 + 서버 녹음 1명.
-                max_participants=INTERCOM_MAX_PARTICIPANTS + 2,
+                # 사용자 상한(settings.intercom_max) + 관리자 모니터 1명 + 서버 녹음 1명.
+                max_participants=self.settings.intercom_max + 2,
             )
 
     @property
@@ -282,6 +305,14 @@ class AppState:
         self.generation = new_gen
         self.blocklist.clear()
         self.on_air.clear()
+        # 세대 회전으로 구세대 룸·토큰이 폐기되므로 AI 통역 워커도 전부 정지한다
+        # (구세대 토큰으로는 새 룸에 접속할 수 없어 무한 재시작하게 되기 때문).
+        await self.ai_channels.close()
+        # 인메모리 워커를 정지해도 open AI 채널 행은 DB 에 남아 슬롯을 점유하므로 함께
+        # 닫는다(HIGH2). rotate_send_password 가 이미 전체 lease 를 폐기했다.
+        closed_ai = self.db.close_open_ai_channels()
+        if closed_ai:
+            log.info("closed_orphan_ai_channels_on_rotation channels=%s", closed_ai)
 
     async def bootstrap(self) -> None:
         """기동 시퀀스: 세대 결정 → 새 세대 룸 생성 → 구세대 룸 삭제 → reconcile."""
@@ -302,6 +333,15 @@ class AppState:
         # 세대 변경 시 구세대 lease 를 전부 정리한다(구세대 토큰은 어차피 무효).
         if generation_changed:
             self.db.clear_all_leases()
+
+        # 이전 프로세스가 남긴 open AI 채널 행은 인메모리 워커가 없는 상태다. 세대가
+        # 바뀌었거나(구세대 토큰 무효) OpenAI 키가 없으면 복원할 수 없으므로 슬롯을
+        # 영구 점유하지 않도록 원자적으로 닫는다(HIGH2). 그 외에는 reconcile 이 끝난 뒤
+        # 워커를 다시 스폰해 복원한다(bootstrap 말미의 restore_ai_channels).
+        if generation_changed or not self.settings.openai_api_key:
+            closed_ai = self.db.close_open_ai_channels()
+            if closed_ai:
+                log.info("closed_orphan_ai_channels_on_bootstrap channels=%s", closed_ai)
 
         # 세대 변경 시 메모리 차단 목록·on-air 초기화(계약).
         self.blocklist.clear()
@@ -367,3 +407,66 @@ class AppState:
                 # 제거 실패를 삼키면 고아 발행자가 룸에 남아 후속 lease 발급을 계속 막으므로
                 # 예외를 전파해 기동을 중단한다(fail-fast).
                 await self.livekit.remove_participant(target, ident)
+
+        # reconcile 로 고아 lease 를 정리한 뒤 AI 통역 워커를 복원한다(순서 중요 —
+        # 이전 프로세스의 lease 가 남아 있으면 새 워커 identity 와 어긋난다).
+        await self.restore_ai_channels()
+
+    # ---- AI 통역 채널 ----
+    def ai_token_provider(self, channel_id: int):
+        """AI 워커가 매 (재)접속 시 호출하는 fresh publish 토큰 프로바이더(HIGH1).
+
+        채널 슬롯 기준으로 lease 를 재획득(force)하고 새 identity 로 publish 토큰을 발급한다.
+        슈퍼바이저가 재시작할 때마다 새 JWT·lease 를 받으므로 '최초 1시간 토큰 재사용 →
+        1시간 뒤 영구 재접속 거절' 결함이 사라진다. 워커가 join 하기 전에 lease.identity 가
+        먼저 갱신되므로 webhook 강제(identity 일치)도 통과한다. 채널이 닫혔으면 예외를 던져
+        슈퍼바이저 루프가 (stop 신호와 함께) 자연 종료하게 한다.
+        """
+
+        async def provider() -> str:
+            ch = self.db.get_channel(channel_id)
+            if ch is None or ch.state != "open" or ch.source != "ai":
+                raise RuntimeError(f"ai channel {channel_id} not open")
+            nonce = new_nonce()
+            identity = self.db.force_acquire_lease(
+                channel_id, ch.epoch, self.generation, nonce, PUBLISH_TTL_SECONDS
+            )
+            return issue_publish_token(
+                self.settings.livekit_api_key,
+                self.settings.livekit_api_secret,
+                self.generation,
+                identity,
+                can_publish_data=True,  # 워커는 자막을 data 패킷으로 발행한다.
+            )
+
+        return provider
+
+    async def restore_ai_channels(self) -> list[int]:
+        """재시작 후에도 열려 있는 AI 통역 채널의 워커를 다시 스폰한다.
+
+        복원 실패(토큰 발급 불가 등)한 채널은 슬롯을 영구 점유하지 않도록 닫는다.
+        워커의 실제 접속 성공은 기다리지 않는다 — 접속은 슈퍼바이저가 백오프 재시도로
+        수렴시키며, 여기서 대기하면 LiveKit·OpenAI 지연이 서버 기동을 막기 때문이다.
+        """
+        restored: list[int] = []
+        for ch in self.db.list_open_ai_channels():
+            cid = ch.channel_id
+            try:
+                provider = self.ai_token_provider(cid)
+                params = AiWorkerParams(
+                    channel_id=cid,
+                    target_language=ch.target_language or "",
+                    rtc_url=self.settings.livekit_rtc_url,
+                    token=await provider(),  # 최초 접속 토큰(+lease 재획득)
+                    room=self.room,
+                    publish_track=f"ch-{cid:02d}",
+                    subscribe_track=f"ch-{(ch.source_channel or 0):02d}",
+                )
+                self.ai_channels.start(params, token_provider=provider)
+                restored.append(cid)
+            except Exception:  # noqa: BLE001 — 한 채널 실패가 나머지 복원을 막지 않게
+                log.exception("ai_channel_restore_failed ch=%s", cid)
+                self.db.close_channel(cid)
+        if restored:
+            log.info("restored_ai_channels_on_bootstrap channels=%s", restored)
+        return restored

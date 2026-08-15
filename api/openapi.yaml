@@ -324,6 +324,8 @@ tags:
     description: 채널별 on-air·청취자 수 상태.
   - name: admin
     description: 관리자 대시보드용 상태 조회 및 takeover.
+  - name: ai
+    description: 모드 C AI 통역 채널(gpt-realtime-translate 워커) 개설·종료·헬스.
   - name: meta
     description: 헬스체크·서버 메타.
 
@@ -658,6 +660,157 @@ paths:
           $ref: "#/components/responses/RateLimited"
         "423":
           $ref: "#/components/responses/Locked"
+
+  /ai-channels:
+    post:
+      tags: [ai]
+      operationId: createAiChannel
+      summary: AI 통역 채널 개설(원음 구독 → gpt-realtime-translate → ch-NN 재발행)
+      description: |
+        `FIELD_SEND_PASSWORD`(Bearer) 검증 후 **목표 언어 1개**를 담당하는 서버측 번역
+        워커를 스폰한다. 워커는 원음 채널(`source_channel`, 기본 Floor `ch-00`)을 구독해
+        번역한 오디오를 자신에게 배정된 최저 빈 슬롯 `ch-NN` 으로 재발행한다. 사람 송신과
+        달리 lease 소유자가 서버 워커이므로 웹훅 강제(identity·트랙명·lease)를 그대로
+        통과하며, 해당 슬롯에는 **사람이 송신할 수 없다**(`POST /publish-tokens` → 409).
+
+        **비용 규칙**: OpenAI 세션은 목표 언어당 1개다. 청취자 수와 무관하게 SFU 가
+        팬아웃하므로 비용은 (언어 수 × 시간)에만 비례한다. 청취자당 세션 개설은 금지.
+
+        **자막**: 워커는 원문·번역 자막 델타를 LiveKit **data 패킷**(topic `captions`)으로
+        발행한다. 페이로드는 `{channel_id, track_name, kind(source|target), language, seq,
+        delta}` JSON 이다. 청취 클라이언트는 오디오 구독과 별개로 이 topic 을 받아 렌더한다.
+
+        **무중단**: 워커는 OpenAI 세션 한계(60분) 전 T-5분에 둘째 WS 를 워밍해 원자적으로
+        교체한다(make-before-break). 교체 중에도 LiveKit 트랙은 유지되어 청취가 끊기지 않는다.
+
+        **복원**: 서버 재시작 시 열린 AI 채널은 워커를 다시 스폰해 복원한다. 단 비밀번호
+        세대가 바뀌었거나 `OPENAI_API_KEY` 가 없으면 슬롯을 반납하고 닫는다.
+
+        **비용 가드(자동 종료)**: 워커는 무음까지 OpenAI 로 연속 전송하므로(서버 VAD 계약)
+        송신이 켜진 시간에 비례해 과금된다. 원음 프레임이 **10분간** 오지 않으면 서버가
+        채널을 자동 종료한다 — 개설만 해두고 방치하거나 송신 종료 후 채널을 안 닫아도
+        토큰이 계속 나가지 않게. 판정값은 status 의 `floor_idle_seconds`.
+
+        실패 시: 키 미설정 `503 ai_unavailable`, 슬롯 없음 `409 max_channels_reached`,
+        원음 채널이 유효하지 않거나 의존성 순환 `409 invalid_source`, 워커가 제한시간
+        내에 접속하지 못하면 채널·lease 를 롤백하고 `503 ai_unavailable`.
+      security:
+        - sendPassword: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiChannelCreate"
+      responses:
+        "201":
+          description: 개설됨(워커 최초 접속 확인 완료)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiChannel"
+        "401":
+          description: 비밀번호 불일치
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: invalid_password
+                message: 비밀번호가 올바르지 않습니다.
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "409":
+          description: 슬롯 없음 / 원음 채널 무효 / 의존성 순환 / 슬롯 경합
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: invalid_source
+                message: 원음 채널 의존성이 순환합니다.
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "423":
+          $ref: "#/components/responses/Locked"
+        "503":
+          description: OpenAI 키 미설정 또는 워커가 제한시간 내 접속 실패(롤백됨)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: ai_unavailable
+                message: AI 통역 워커가 제한시간 내 연결에 실패했습니다.
+
+  /ai-channels/{channelId}:
+    delete:
+      tags: [ai]
+      operationId: deleteAiChannel
+      summary: AI 통역 채널 종료(워커 정지 후 채널 닫기)
+      description: |
+        server-first 로 워커를 먼저 정지(OpenAI 세션 종료 → 룸 disconnect)한 뒤 채널을
+        닫고 lease 를 반납한다. 이 채널을 원음으로 구독하던 다른 AI 채널이 있으면 함께
+        cascade 종료된다(원음이 사라진 워커가 무한 재시작하지 않도록).
+      security:
+        - sendPassword: []
+      parameters:
+        - $ref: "#/components/parameters/ChannelId"
+      responses:
+        "204":
+          description: 종료됨
+        "401":
+          description: 비밀번호 불일치
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/HttpsRequired"
+        "404":
+          description: AI 통역 채널이 아니거나 열려 있지 않음
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: not_found
+                message: AI 통역 채널을 찾을 수 없습니다.
+
+  /ai-channels/{channelId}/status:
+    get:
+      tags: [ai]
+      operationId: getAiChannelStatus
+      summary: AI 통역 워커 헬스(실행 여부·재시작 수·세션 나이·마지막 오디오)
+      description: |
+        운영 모니터링용. `worker.seq` 는 발행한 번역 오디오 프레임 수, `caption_seq` 는
+        발행한 자막 data 패킷 수, `renewals` 는 make-before-break 교체 횟수다.
+        `last_audio_at` 이 오래 갱신되지 않으면 원음 무음이거나 파이프라인 이상이다.
+      security:
+        - sendPassword: []
+      parameters:
+        - $ref: "#/components/parameters/ChannelId"
+      responses:
+        "200":
+          description: 조회됨
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiChannel"
+        "401":
+          description: 비밀번호 불일치
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: AI 통역 채널이 아님
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /intercom-tokens:
     post:
@@ -1380,6 +1533,122 @@ components:
           maxLength: 64
           description: 새 비밀번호(4~64자, 흔한 기본값 금지)
           example: "0211"
+
+    AiChannelCreate:
+      type: object
+      description: AI 통역 채널 개설 요청(목표 언어 1개 = OpenAI 세션 1개)
+      required: [target_language]
+      properties:
+        target_language:
+          type: string
+          description: |
+            번역 목표 언어(소문자 ISO). gpt-realtime-translate 출력 지원 13종:
+            es, pt, fr, ja, ru, zh, de, ko, hi, id, vi, it, en.
+          enum: [es, pt, fr, ja, ru, zh, de, ko, hi, id, vi, it, en]
+          example: ko
+        source_channel:
+          type: integer
+          minimum: 0
+          maximum: 15
+          default: 0
+          description: 워커가 구독할 원음 채널. 기본 Floor(ch-00). 자기 슬롯·닫힌 채널·순환은 409.
+          example: 0
+
+    AiChannelWorker:
+      type: object
+      description: 번역 워커 헬스 지표
+      properties:
+        channel_id:
+          type: integer
+        target_language:
+          type: string
+        running:
+          type: boolean
+          description: 감독 task 실행 중 여부
+        restart_count:
+          type: integer
+          description: 크래시로 재시작한 횟수(백오프 재시작)
+        last_error:
+          type: string
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+        session_age_seconds:
+          type: number
+          nullable: true
+          description: 현재 OpenAI 세션 경과 시간(초). 55분에서 make-before-break 갱신.
+        last_audio_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 마지막 번역 오디오 프레임 발행 시각
+        last_floor_frame_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 마지막으로 원음 프레임을 받은 시각(한 번도 없으면 null)
+        floor_idle_seconds:
+          type: number
+          nullable: true
+          description: |
+            원음이 끊긴 경과 시간(초). 한 번도 못 받았으면 워커 기동 시각부터 센다.
+            임계(기본 10분)를 넘으면 서버가 채널을 자동 종료한다(비용 가드).
+        seq:
+          type: integer
+          description: 발행한 번역 오디오 프레임 수
+        caption_seq:
+          type: integer
+          description: 발행한 자막 data 패킷 수(topic=captions)
+        renewals:
+          type: integer
+          description: make-before-break 세션 교체 횟수
+        renewal_due:
+          type: boolean
+          description: 갱신 시점(T-5분) 도달 여부
+
+    AiChannel:
+      type: object
+      description: AI 통역 채널 뷰(개설 응답·헬스 조회 공용)
+      required: [channel_id, track_name, room]
+      properties:
+        channel_id:
+          type: integer
+          description: 번역 오디오를 발행하는 출력 슬롯
+          example: 1
+        target_language:
+          type: string
+          example: ko
+        source:
+          type: string
+          enum: [ai]
+          description: 채널 소유 주체. AI 채널은 항상 ai(사람 송신 불가).
+        state:
+          type: string
+          enum: [open, closed]
+        track_name:
+          type: string
+          description: 청취자가 구독할 트랙명
+          example: ch-01
+        room:
+          type: string
+          example: field-g1
+        identity:
+          type: string
+          description: 워커 participant identity(개설 응답에만 포함)
+          example: speaker-ch-01-e1-g1-nkJUz4s
+        source_channel:
+          type: integer
+          description: 구독 중인 원음 채널(개설 응답에만 포함)
+          example: 0
+        generation:
+          type: integer
+          description: 비밀번호 세대(개설 응답에만 포함)
+        worker:
+          allOf:
+            - $ref: "#/components/schemas/AiChannelWorker"
+          nullable: true
+          description: 워커 헬스. 채널이 레지스트리에 없으면 null.
 
     ChannelCreate:
       type: object
