@@ -25,9 +25,10 @@
 - [ ] 무음 구간 append 게이팅(발행 중이지만 아무도 말하지 않는 시간의 토큰 절감) — 실사용 패턴 확인 후 판단.
 
 ## 증분 2 — 클라우드 배포 + 무전기 인증 (서버, 인프라 필요)
-- [ ] `docker-compose.cloud.yml` + LiveKit 내장 TURN(TLS 443) + Caddy `field.ev211.com`
-- [ ] 계정 귀속 송신 코드 발급/검증 → publish 토큰 (ev211.com 위임 계약)
-- [ ] 무전기(통역 없음) 클라우드 PTT — `intercom_*` 경로 클라우드 대상 (앱)
+- [x] `docker-compose.cloud.yml` + LiveKit 내장 TURN — **AWS Lightsail 서울(15.165.188.147, $7 micro)에 배포됨(2026-08-15)**. TURN 은 UDP 3478 활성(인증서 불필요). **TURN-over-TLS(443)·Caddy `field.ev211.com` 은 DNS 전환+공인 인증서 후**(오버레이 주석 참조).
+- [x] 클라우드 AI 통역 E2E — `ai_live_e2e.py` 공인망 2회 PASS(첫 소리 콜드 13.2초/웜 2.9초). 실기기(아이패드) 청취 PASS.
+- [x] 무전기(통역 없음) 클라우드 PTT — **앱 수정 없이 모드 A 무전기 화면 + 클라우드 IP 로 동작**(2026-08-15 실기기 2대 상호 PTT, 서버 원장에 채널 1 동시 발행 기록). 송신·수신 화면도 동일하게 동작 확인. **잔여: 이종망(셀룰러 vs Wi-Fi) TURN 통과 1회**(두 기기가 같은 망이었음).
+- [ ] 계정 귀속 송신 코드 발급/검증 → publish 토큰 — **설계 완료(`docs/SEND_CODE_DELEGATION.md`)**, 구현은 Rails(ev211.com)→field-api→앱 순 후속.
 
 ## 증분 3 — 송신(원어)+수신(SFU)+코드 분기 (앱)
 - [ ] `cloud_screen.dart` 3-버튼 허브(송신/수신/무전기)
