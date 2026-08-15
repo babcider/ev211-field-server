@@ -25,10 +25,14 @@ from .config import (
     PUBLISH_TTL_SECONDS,
     SIGNAL_LOG_CLEANUP_INTERVAL_SECONDS,
     SIGNAL_LOG_RETENTION_SECONDS,
+    USAGE_PUSH_INTERVAL_SECONDS,
+    USAGE_SESSION_MAX_SECONDS,
+    USAGE_SESSION_RETENTION_SECONDS,
     load_settings,
 )
 from .db import ChannelExists, Database, new_nonce
 from .http_util import client_ip, is_https
+from .live_auth import LiveSendVerifier
 from .livekit_client import LiveKitClient
 from .recording import RecordingError
 from .state import AppState
@@ -260,6 +264,30 @@ async def _ai_idle_sweep_loop(state: AppState) -> None:
             log.exception("ai_idle_sweep_failed")
 
 
+async def _usage_push_sweep(st: AppState) -> tuple[int, int]:
+    """좀비 세션을 마감하고 미보고 세션을 ev211.com 으로 보고한다(계약 §4).
+
+    이탈 웹훅 유실·프로세스 재시작으로 열린 채 남은 세션은 상한 시간까지만 쓴 것으로
+    마감한다 — 그러지 않으면 영원히 보고 대기 상태로 남는다.
+    """
+    st.db.close_stale_usage_sessions(USAGE_SESSION_MAX_SECONDS)
+    return await st.usage_reporter.flush(st.db)
+
+
+async def _usage_push_loop(state: AppState) -> None:
+    """주기적으로 사용량을 보고한다(일시 오류로 루프가 죽지 않게 흡수)."""
+    if not state.usage_reporter.enabled:
+        return  # 내부망 배포 — 보고 대상이 없다.
+    while True:
+        await asyncio.sleep(USAGE_PUSH_INTERVAL_SECONDS)
+        try:
+            await _usage_push_sweep(state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — 다음 주기에 재시도
+            log.exception("usage_push_sweep_failed")
+
+
 async def _signal_log_cleanup_loop(state: AppState) -> None:
     """하루마다 30일 보존 기한을 지난 신호 이벤트를 정리한다."""
     while True:
@@ -268,6 +296,9 @@ async def _signal_log_cleanup_loop(state: AppState) -> None:
             deleted = state.db.purge_signal_events(SIGNAL_LOG_RETENTION_SECONDS)
             if deleted:
                 log.info("purged_signal_events count=%s", deleted)
+            purged = state.db.purge_usage_sessions(USAGE_SESSION_RETENTION_SECONDS)
+            if purged:
+                log.info("purged_usage_sessions count=%s", purged)
         except Exception:
             # 일시 DB 오류로 정리 task가 영구 종료되지 않게 다음 주기에 재시도한다.
             log.exception("signal_event_cleanup_failed")
@@ -297,10 +328,12 @@ def create_app(state: AppState | None = None) -> FastAPI:
         cleanup_task = asyncio.create_task(_signal_log_cleanup_loop(app.state.field))
         # 비용 가드: 원음이 끊긴 AI 채널을 주기적으로 닫는다(OpenAI 토큰 유출 차단).
         idle_task = asyncio.create_task(_ai_idle_sweep_loop(app.state.field))
+        # 사용량 보고(계약 §4): 종료된 세션을 ev211.com 으로 배치 push 한다.
+        usage_task = asyncio.create_task(_usage_push_loop(app.state.field))
         try:
             yield
         finally:
-            for task in (cleanup_task, idle_task):
+            for task in (cleanup_task, idle_task, usage_task):
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
@@ -423,7 +456,14 @@ async def _auth_send(st: AppState, authorization: str | None) -> bool:
     if mode in ("password", "both") and _auth_bearer(authorization, st.send_password):
         return True
     if st.live_verifier is not None:
-        return await st.live_verifier.verify(_bearer(authorization))
+        token = _bearer(authorization)
+        ok = await st.live_verifier.verify(token)
+        if ok:
+            # 검증된 복합 Bearer 의 join_code 를 사용량 귀속 기준으로 기록한다(계약 §4).
+            pair = LiveSendVerifier.split_bearer(token)
+            if pair is not None:
+                st.note_active_join_code(pair[0])
+        return ok
     return False
 
 

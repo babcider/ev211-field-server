@@ -67,6 +67,22 @@ class SignalEventRow:
     source_event_id: str | None
 
 
+@dataclass
+class UsageSessionRow:
+    """사용량 보고 단위 세션(라이브 API 계약 §4). ev211.com 으로 push 하는 원천."""
+
+    session_id: int
+    join_code: str
+    kind: str  # listen | send | intercom | ai_translate
+    language: str | None
+    channel_id: int | None
+    subject_hash: str
+    started_at: float
+    ended_at: float | None
+    pushed_at: float | None
+    attempts: int
+
+
 class Database:
     """단일 SQLite 연결을 WAL 모드로 감싸는 원장. 프로세스 내 락으로 원자성을 보장한다.
 
@@ -184,6 +200,29 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_signal_events_occurred_at
             ON signal_events(occurred_at);
+
+            -- ev211.com 으로 보고할 사용량 세션(계약 §4). signal_events 가 감사 원장이라면
+            -- 이쪽은 "누가 얼마나 썼는가"의 집계 원천이다. participant 원문 식별자는
+            -- 저장하지 않고 signal_events 와 같은 해시(subject_hash)만 쓴다.
+            CREATE TABLE IF NOT EXISTS usage_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                join_code TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                language TEXT,
+                channel_id INTEGER,
+                subject_hash TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                pushed_at REAL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            );
+
+            -- 열린 세션 조회(참가/이탈 매칭)와 미전송 세션 스윕이 주 질의다.
+            CREATE INDEX IF NOT EXISTS idx_usage_sessions_open
+            ON usage_sessions(subject_hash, ended_at);
+
+            CREATE INDEX IF NOT EXISTS idx_usage_sessions_pending
+            ON usage_sessions(pushed_at, ended_at);
             """
         )
         c.commit()
@@ -293,6 +332,146 @@ class Database:
         with self._tx():
             cursor = self._conn.execute(
                 "DELETE FROM signal_events WHERE occurred_at < ?", (cutoff,)
+            )
+        return max(0, cursor.rowcount)
+
+    def last_event_channel_for_subject(self, subject_hash: str) -> int | None:
+        """해당 subject 의 가장 최근 이벤트 중 채널이 기록된 것을 찾아 채널 id 를 준다.
+
+        청취자 participant_joined 웹훅에는 채널 정보가 없지만, 직전에 남긴 구독 토큰 발급
+        이벤트(token_issued)에는 채널이 있다 — 사용량 세션의 언어·채널 귀속에 쓴다.
+        """
+        row = self._query_one(
+            "SELECT channel_id FROM signal_events "
+            "WHERE subject_hash=? AND channel_id IS NOT NULL "
+            "ORDER BY occurred_at DESC, id DESC LIMIT 1",
+            (subject_hash,),
+        )
+        return None if row is None else int(row["channel_id"])
+
+    # ---- 사용량 세션(계약 §4) ----
+    def open_usage_session(
+        self,
+        *,
+        join_code: str,
+        kind: str,
+        subject_hash: str,
+        language: str | None = None,
+        channel_id: int | None = None,
+        started_at: float | None = None,
+    ) -> int | None:
+        """세션을 연다. 같은 subject 의 열린 세션이 이미 있으면 열지 않는다(중복 참가 방어).
+
+        반환: 새로 연 세션 id, 이미 열려 있으면 None.
+        """
+        now = _now() if started_at is None else started_at
+        with self._tx():
+            existing = self._conn.execute(
+                "SELECT id FROM usage_sessions WHERE subject_hash=? AND ended_at IS NULL",
+                (subject_hash,),
+            ).fetchone()
+            if existing is not None:
+                return None
+            cursor = self._conn.execute(
+                "INSERT INTO usage_sessions "
+                "(join_code, kind, language, channel_id, subject_hash, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (join_code, kind, language, channel_id, subject_hash, now),
+            )
+        return int(cursor.lastrowid)
+
+    def close_usage_session(self, subject_hash: str, ended_at: float | None = None) -> bool:
+        """해당 subject 의 열린 세션을 닫는다. 닫을 세션이 없으면 False."""
+        now = _now() if ended_at is None else ended_at
+        with self._tx():
+            cursor = self._conn.execute(
+                "UPDATE usage_sessions SET ended_at=? "
+                "WHERE subject_hash=? AND ended_at IS NULL",
+                (now, subject_hash),
+            )
+        return cursor.rowcount > 0
+
+    def close_usage_sessions_for_channel(
+        self, channel_id: int, ended_at: float | None = None
+    ) -> int:
+        """채널이 닫힐 때 그 채널의 열린 세션을 전부 닫는다(워커 정지·채널 삭제 경로)."""
+        now = _now() if ended_at is None else ended_at
+        with self._tx():
+            cursor = self._conn.execute(
+                "UPDATE usage_sessions SET ended_at=? "
+                "WHERE channel_id=? AND ended_at IS NULL",
+                (now, channel_id),
+            )
+        return max(0, cursor.rowcount)
+
+    def close_stale_usage_sessions(self, max_seconds: float, now: float | None = None) -> int:
+        """비정상 종료로 남은 좀비 세션을 강제 종료한다(이탈 웹훅 유실·프로세스 재시작).
+
+        열린 채로 방치되면 영원히 보고되지 않으므로, 상한 시간이 지난 세션은 그 시점까지만
+        쓴 것으로 마감한다(과대 청구 방지를 위해 종료 시각은 started_at + 상한).
+        """
+        cutoff = (_now() if now is None else now) - max_seconds
+        with self._tx():
+            cursor = self._conn.execute(
+                "UPDATE usage_sessions SET ended_at = started_at + ? "
+                "WHERE ended_at IS NULL AND started_at < ?",
+                (max_seconds, cutoff),
+            )
+        return max(0, cursor.rowcount)
+
+    def pending_usage_sessions(self, limit: int = 100) -> list[UsageSessionRow]:
+        """종료됐지만 아직 보고되지 않은 세션을 오래된 순으로 반환한다."""
+        rows = self._query(
+            "SELECT * FROM usage_sessions "
+            "WHERE ended_at IS NOT NULL AND pushed_at IS NULL "
+            "ORDER BY ended_at LIMIT ?",
+            (limit,),
+        )
+        return [
+            UsageSessionRow(
+                session_id=int(r["id"]),
+                join_code=str(r["join_code"]),
+                kind=str(r["kind"]),
+                language=None if r["language"] is None else str(r["language"]),
+                channel_id=None if r["channel_id"] is None else int(r["channel_id"]),
+                subject_hash=str(r["subject_hash"]),
+                started_at=float(r["started_at"]),
+                ended_at=None if r["ended_at"] is None else float(r["ended_at"]),
+                pushed_at=None if r["pushed_at"] is None else float(r["pushed_at"]),
+                attempts=int(r["attempts"]),
+            )
+            for r in rows
+        ]
+
+    def mark_usage_sessions_pushed(self, ids: list[int], now: float | None = None) -> int:
+        """보고 성공한 세션에 pushed_at 을 남긴다(재전송 방지)."""
+        if not ids:
+            return 0
+        stamp = _now() if now is None else now
+        with self._tx():
+            cursor = self._conn.executemany(
+                "UPDATE usage_sessions SET pushed_at=? WHERE id=?",
+                [(stamp, i) for i in ids],
+            )
+        return max(0, cursor.rowcount)
+
+    def bump_usage_session_attempts(self, ids: list[int]) -> None:
+        """보고 실패 횟수를 올린다(포기 판정·관제용)."""
+        if not ids:
+            return
+        with self._tx():
+            self._conn.executemany(
+                "UPDATE usage_sessions SET attempts = attempts + 1 WHERE id=?",
+                [(i,) for i in ids],
+            )
+
+    def purge_usage_sessions(self, retention_seconds: int, now: float | None = None) -> int:
+        """보고 완료 후 보관 기간이 지난 세션을 삭제한다(원장은 signal_events 가 보관)."""
+        cutoff = (_now() if now is None else now) - retention_seconds
+        with self._tx():
+            cursor = self._conn.execute(
+                "DELETE FROM usage_sessions WHERE pushed_at IS NOT NULL AND pushed_at < ?",
+                (cutoff,),
             )
         return max(0, cursor.rowcount)
 
@@ -452,9 +631,15 @@ class Database:
         return self.get_channel(channel_id)  # type: ignore[return-value]
 
     def close_channel(self, channel_id: int) -> None:
+        now = _now()
         with self._tx():
             self._conn.execute("UPDATE channels SET state='closed' WHERE channel_id=?", (channel_id,))
             self._conn.execute("DELETE FROM leases WHERE channel_id=?", (channel_id,))
+            # 채널이 닫히면 그 채널의 사용량 세션도 끝난 것이다(이탈 웹훅을 기다리지 않는다).
+            self._conn.execute(
+                "UPDATE usage_sessions SET ended_at=? WHERE channel_id=? AND ended_at IS NULL",
+                (now, channel_id),
+            )
 
     def close_open_ai_channels(self) -> list[int]:
         """열린 AI 채널(source='ai', state='open')을 원자적으로 닫고 채널 id 목록을 반환한다(HIGH2).
@@ -463,6 +648,7 @@ class Database:
         채널 행은 워커 없는 고아가 되어 슬롯을 영구 점유한다. 복원 대신 정리한다(자동
         재스폰은 후속). 해당 채널 lease 도 함께 삭제해 슬롯을 즉시 반납한다.
         """
+        now = _now()
         with self._tx():
             rows = self._conn.execute(
                 "SELECT channel_id FROM channels WHERE source='ai' AND state='open'"
@@ -474,6 +660,11 @@ class Database:
                 )
                 self._conn.executemany(
                     "DELETE FROM leases WHERE channel_id=?", [(i,) for i in ids]
+                )
+                self._conn.executemany(
+                    "UPDATE usage_sessions SET ended_at=? "
+                    "WHERE channel_id=? AND ended_at IS NULL",
+                    [(now, i) for i in ids],
                 )
         return ids
 

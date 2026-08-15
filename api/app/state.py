@@ -37,8 +37,12 @@ from .translate_worker import (
     AiWorkerParams,
     build_default_ai_worker_factory,
 )
+from .usage_reporter import UsageReporter
 
 log = logging.getLogger(__name__)
+
+# 현재 진행 중인 라이브의 접속코드를 담는 settings 키(사용량 귀속 기준, 계약 §4).
+ACTIVE_JOIN_CODE_KEY = "active_join_code"
 
 
 def password_hash(send_pw: str, admin_pw: str) -> str:
@@ -107,6 +111,16 @@ class AppState:
         # rtc.Room)를 주입한다. 테스트는 이 속성을 fake 워커 팩토리 매니저로 교체한다.
         self.ai_channels = AiChannelManager(build_default_ai_worker_factory(settings))
 
+        # 사용량 귀속 기준이 되는 현재 라이브(계약 §4). 송신 인증 성공 시 갱신되며,
+        # 재시작 후에도 진행 중인 라이브의 세션이 이어지도록 DB 에서 복원한다.
+        self._active_join_code: str = db.get_setting(ACTIVE_JOIN_CODE_KEY) or ""
+
+        # 종료된 세션을 ev211.com 으로 보고하는 리포터. 콜백 주소·시크릿이 없으면
+        # 비활성(내부망 배포는 보고 대상이 없다). 테스트는 이 속성을 Fake 로 교체한다.
+        self.usage_reporter = UsageReporter(
+            settings.ev211_api_base, settings.field_callback_secret
+        )
+
     def intercom_pw_key_lock(self, key: str) -> asyncio.Lock:
         """채널 비번 시도(IP:channel_id) 키별 직렬화 락(없으면 생성)."""
         lock = self._intercom_pw_key_locks.get(key)
@@ -154,7 +168,85 @@ class AppState:
                 channel_id,
                 self.generation if generation is None else generation,
             )
+            self._track_usage(
+                direction=direction,
+                event_type=event_type,
+                scope=scope,
+                channel_id=channel_id,
+                subject_hash=subject_hash,
+            )
         return inserted
+
+    # ---- 사용량 세션 파생(계약 §4) ----
+    def note_active_join_code(self, join_code: str) -> None:
+        """송신 인증에 성공한 라이브를 현재 활성 라이브로 기록한다(사용량 귀속 기준).
+
+        field-server 는 룸 하나를 한 라이브가 쓰는 구조라, 마지막으로 인증된 join_code 가
+        곧 현재 진행 중인 라이브다. 재시작 후에도 유지되도록 settings 에 영속한다.
+        세션은 열릴 때 이 값을 스냅샷하므로, 라이브가 교체돼도 이미 열린 세션의 귀속은
+        바뀌지 않는다.
+        """
+        code = (join_code or "").strip().upper()
+        if not code or code == self._active_join_code:
+            return
+        self._active_join_code = code
+        try:
+            self.db.set_setting(ACTIVE_JOIN_CODE_KEY, code)
+        except Exception:  # noqa: BLE001 — 영속 실패해도 인메모리 값으로 계속 집계한다
+            log.warning("active_join_code_persist_failed")
+
+    @property
+    def active_join_code(self) -> str:
+        return self._active_join_code
+
+    def _usage_kind(self, direction: str, scope: str, channel_id: int | None) -> tuple[str, str | None]:
+        """이벤트 좌표를 계약 §4 의 kind 와 language 로 해석한다."""
+        if scope == "intercom":
+            return "intercom", None
+        ch = self.db.get_channel(channel_id) if channel_id is not None else None
+        if direction == "receive":
+            return "listen", (ch.language if ch is not None else None)
+        # 송신 계열 — AI 통역 채널은 서버 워커가 송신하므로 별도 kind 로 집계한다.
+        if ch is not None and ch.source == "ai":
+            return "ai_translate", ch.target_language
+        return "send", (ch.language if ch is not None else None)
+
+    def _track_usage(
+        self,
+        *,
+        direction: str,
+        event_type: str,
+        scope: str,
+        channel_id: int | None,
+        subject_hash: str | None,
+    ) -> None:
+        """참가/이탈 이벤트에서 사용량 세션을 열고 닫는다(보고는 스윕이 한다).
+
+        집계 대상이 아닌 이벤트(토큰 발급·트랙 published 등)는 그냥 지나간다. 실패해도
+        신호 이벤트 기록·요청 처리에는 영향을 주지 않는다(사용량은 부가 기능).
+        """
+        if not subject_hash or event_type not in ("participant_joined", "participant_left"):
+            return
+        try:
+            if event_type == "participant_left":
+                self.db.close_usage_session(subject_hash)
+                return
+            join_code = self._active_join_code
+            if not join_code:
+                return  # 내부망(비번 모드) 등 귀속 라이브가 없으면 집계하지 않는다.
+            if channel_id is None and scope == "relay":
+                # 청취자 참가 웹훅에는 채널이 없다 — 직전 구독 토큰 발급 이벤트에서 찾는다.
+                channel_id = self.db.last_event_channel_for_subject(subject_hash)
+            kind, language = self._usage_kind(direction, scope, channel_id)
+            self.db.open_usage_session(
+                join_code=join_code,
+                kind=kind,
+                subject_hash=subject_hash,
+                language=language,
+                channel_id=channel_id,
+            )
+        except Exception:  # noqa: BLE001 — 사용량 집계 실패가 통역을 막지 않게 한다
+            log.warning("usage_session_track_failed event=%s scope=%s", event_type, scope)
 
     def channel_lock(self, channel_id: int) -> asyncio.Lock:
         """채널별 직렬화 락을 반환한다(없으면 생성). 이벤트루프 단일 스레드에서만 호출된다.

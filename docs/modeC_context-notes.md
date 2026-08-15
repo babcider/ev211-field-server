@@ -47,6 +47,18 @@
 - **발행자 없음 vs 무음은 다르다**: 발행자가 붙어 있으면 무음이라도 프레임이 계속 오므로 idle 이 아니다(정상 — 예배 중 침묵을 끊으면 안 되니까). 이 가드가 막는 것은 "송신 종료·미개시인데 채널만 열린" 상태다. 무음 구간 append 게이팅은 별도 과제(실사용 패턴 확인 후).
 - 상수: `AI_IDLE_CLOSE_SECONDS=600`, `AI_IDLE_CHECK_SECONDS=60`.
 
+## 사용량 보고 구현 (2026-08-16, 계약 §4 v1.6)
+- **동기**: Rails 수신측(`POST /api/field/usage` + `FieldUsageRecord` + 슈퍼어드민 사용 모니터링 화면)은 완비돼 있었는데 field-server 송신측이 없어 화면이 비어 있었다. 계약에 정의만 되고 미구현으로 남아 있던 마지막 서버 항목.
+- **파생 지점을 하나로**: 세션 훅을 여러 라우트에 심지 않고 `AppState.record_signal_event` **한 곳**에 걸었다. webhook 과 main 이 모두 이 통로로 참가/이탈을 기록하므로, 여기 하나만 잡으면 send·listen·intercom·ai_translate 가 전부 덮인다(변경 표면 최소화 = 회귀 위험 최소화).
+- **kind 는 참가 좌표로 판정한다**: 릴레이 룸 송신자 → 채널이 `source='ai'` 면 `ai_translate`(language=target_language), 아니면 `send`. 릴레이 룸 수신자 → `listen`. 인터컴 룸 → `intercom`. AI 워커도 speaker identity 로 참가하므로 별도 훅 없이 자동으로 잡힌다.
+- **청취자 채널은 원장 역참조로 얻는다**: 청취자 `participant_joined` 웹훅에는 channel_id 가 없다(webhook.py 가 receive 는 채널을 채우지 않는다). 직전 `token_issued`(구독 토큰 발급) 이벤트에 채널이 있으므로 `last_event_channel_for_subject` 로 되짚는다 — webhook.py 를 건드리지 않으려는 선택.
+- **join_code 귀속**: 룸 하나 = 라이브 하나라, 송신 인증(복합 Bearer)에 성공한 마지막 join_code 를 활성 라이브로 두고(`settings.active_join_code` 로 영속) 세션 개설 시 스냅샷한다. 채널마다 컬럼을 두는 대신 이 방식을 택한 이유는 청취·무전기처럼 인증을 거치지 않는 참가자도 같은 라이브로 귀속돼야 하기 때문. 이미 열린 세션은 라이브가 바뀌어도 귀속이 변하지 않는다.
+- **마감 경로 3중**: ① 이탈 웹훅 ② `close_channel`(수동 종료·idle 가드·세대 회전 — 이탈 웹훅을 기다리지 않는다) ③ 6시간 좀비 스윕. ③은 **started_at + 상한**으로 마감한다(now 로 마감하면 재시작 때마다 과대 청구).
+- **집계 실패가 통역을 막지 않는다**: `_track_usage` 는 예외를 삼킨다. 사용량은 부가 기능이고 오디오 경로를 죽이면 안 된다.
+- **검증**: 단위 20건(뮤테이션 2종으로 테스트가 실제로 잡는지 확인) + 로컬 도커 E2E. 송신 15초·청취 12초·ai_translate 16초가 실제 LiveKit 참가/이탈에서 나와 배치로 push 됐고, 페이로드가 Rails 컨트롤러 테스트 형식과 일치했다(양쪽에 zh-CN 케이스 회귀 테스트 추가).
+- **하니스**: 가짜 ev211 수신 서버(scratchpad, 세션 휘발) + `usage_e2e.py`. AI 워커 없이 송신·청취만으로도 세션 파생을 검증할 수 있어 OpenAI 토큰 0 으로 회귀 확인이 가능하다 — 패턴만 기억하고 필요 시 재작성.
+- **미배포**: 코드·문서·테스트는 main 에 있으나 클라우드 field-server 에는 아직 올리지 않았다(다음 배포 때 rsync + `--build` 필수 — 구버전 이미지 배포 함정 재발 주의).
+
 ## 열린 항목
 - ev211.com Rails 측 송신 코드 레지스트리·manifest `transport` 필드 = 별도 리포(ev211) 작업, 증분 2~3에서.
 - make-before-break 는 단위 테스트 + 로컬 파이프라인까지 검증했고, **55분 실경과 교체는 미검증**(장시간 런 필요).

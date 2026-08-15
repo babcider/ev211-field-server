@@ -52,6 +52,14 @@ AI_MODEL_LANGUAGE_MAP = {"zh-CN": "zh"}
 # 외부(앱·Rails)에 허용하는 카탈로그 코드 = 모델 13종 + 매핑 키. "zh" 직접 지정도 하위호환 허용.
 AI_CATALOG_LANGUAGES = frozenset(AI_SUPPORTED_OUTPUT_LANGUAGES | set(AI_MODEL_LANGUAGE_MAP))
 
+# 사용량 보고(계약 §4) — 종료된 세션을 ev211.com 으로 배치 push 하는 주기.
+USAGE_PUSH_INTERVAL_SECONDS = 60.0
+# 이탈 웹훅 유실·재시작으로 열린 채 남은 세션의 마감 상한. 예배·강의 길이(최대 수 시간)를
+# 넉넉히 덮되, 무한히 열린 세션이 보고되지 않고 남는 것을 막는다.
+USAGE_SESSION_MAX_SECONDS = 6 * 60 * 60
+# 보고 완료된 세션 보관 기간(감사 원장은 signal_events 가 30일 보관한다).
+USAGE_SESSION_RETENTION_SECONDS = 7 * 24 * 60 * 60
+
 # 기본값(변경 강제 대상). .env.example 의 자리표시자를 기동 시 거부한다.
 _DEFAULT_PASSWORDS = {"change-me", "changeme", "", "password", "default"}
 

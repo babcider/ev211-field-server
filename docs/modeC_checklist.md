@@ -28,7 +28,8 @@
 - [x] `docker-compose.cloud.yml` + LiveKit 내장 TURN — **AWS Lightsail 서울(15.165.188.147, $7 micro)에 배포됨(2026-08-15)**. TURN 은 UDP 3478 활성(인증서 불필요). **TURN-over-TLS(443)·Caddy `field.ev211.com` 은 DNS 전환+공인 인증서 후**(오버레이 주석 참조).
 - [x] 클라우드 AI 통역 E2E — `ai_live_e2e.py` 공인망 2회 PASS(첫 소리 콜드 13.2초/웜 2.9초). 실기기(아이패드) 청취 PASS.
 - [x] 무전기(통역 없음) 클라우드 PTT — **앱 수정 없이 모드 A 무전기 화면 + 클라우드 IP 로 동작**(2026-08-15 실기기 2대 상호 PTT, 서버 원장에 채널 1 동시 발행 기록). 송신·수신 화면도 동일하게 동작 확인. **이종망 검증 완료(2026-08-15)**: LTE 송신(223.38.227.71)→SFU→Wi-Fi 수신(122.42.175.35) 재생 확인. SFU 구조라 미디어는 항상 클라이언트↔서버 직결이며 이번 검증은 양 망 모두 UDP 도달 — TURN 은 UDP 차단 망 폴백으로 대기(강제 검증은 UDP 차단 환경 확보 시).
-- [ ] 계정 귀속 송신 코드 발급/검증 → publish 토큰 — **설계 완료(`docs/SEND_CODE_DELEGATION.md`)**, 구현은 Rails(ev211.com)→field-api→앱 순 후속.
+- [x] 계정 귀속 송신 인증 — **라이브 계약 v1.2 의 복합 Bearer(`join_code:send_password`) + verify_send 콜백으로 대체 구현·배포됨**. `SEND_CODE_DELEGATION.md` 의 8자리 코드 안은 채택되지 않았다(라이브별 송신 비번이 같은 목적을 더 단순하게 달성).
+- [x] **사용량 보고(계약 §4) — field-server → Rails push 구현(2026-08-16)**. 참가자 세션 단위·60초 배치. Rails 수신측은 이미 있었고 송신측만 비어 있었다. 단위 20건 + 로컬 도커 E2E(송신/청취/ai_translate 실측 push) 통과. **클라우드 배포는 미완**.
 
 ## 증분 3 — 송신(원어)+수신(SFU)+코드 분기 (앱)
 - [ ] `cloud_screen.dart` 3-버튼 허브(송신/수신/무전기)

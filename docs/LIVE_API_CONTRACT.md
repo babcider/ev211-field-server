@@ -65,6 +65,18 @@
 - 201 `{"accepted": n, "skipped": n}` — field-server 의 로컬 원장 정리 판단 근거. [v1.1: 응답 바디 명시]
 - Rails 는 join_code → service/church 를 해석해 `field_usage_records` 저장(유저별=church별, 시간대별 집계의 원천).
 
+**보고 단위·시점 [v1.6 구현 확정]** — 채널 단위가 아니라 **참가자 세션 단위**(참가~이탈)로 만들고, 60초 주기 배치로 보낸다.
+
+- 세션은 LiveKit 참가/이탈 이벤트에서 파생한다. `kind` 는 참가 좌표로 판정한다 —
+  릴레이 룸 송신자는 `send`, 그 채널이 AI 통역 채널(`source='ai'`)이면 `ai_translate`(language=번역 목표 언어),
+  릴레이 룸 수신자는 `listen`(language=구독 채널 언어), 인터컴 룸은 `intercom`(language 없음).
+- `join_code` 는 **송신 인증(§7 복합 Bearer)에 성공한 마지막 라이브**를 귀속 기준으로 쓴다(룸 하나 = 라이브 하나).
+  이미 열린 세션은 라이브가 교체돼도 개설 시점의 귀속을 유지한다. 귀속 라이브가 없으면(내부망 비번 모드) 집계하지 않는다.
+- 채널이 닫히면(수동 종료·idle 가드·세대 회전) 이탈 웹훅을 기다리지 않고 그 채널의 열린 세션을 마감한다.
+- 이탈 웹훅 유실·프로세스 재시작으로 열린 채 남은 세션은 **최대 6시간까지만 쓴 것으로 마감**한다(과대 청구 방지).
+- 실패한 배치는 다음 주기에 재시도하고, 재시도 10회를 넘기면 보고를 포기한다(로컬 `signal_events` 원장은 남는다).
+  보고 완료된 세션은 7일 후 정리한다.
+
 ## 5. 기기 승인(디바이스 연동) — 앱 로그인 대체
 
 1) `POST /api/app/device_links`  body `{"device_name": "iPhone 16 Pro"}` (무인증)
@@ -123,4 +135,5 @@
 - 송신 계열 인증: `FIELD_SEND_AUTH_MODE=callback` 시 §3 콜백으로 라이브별 비번 검증(5분 긍정 캐시).
 - **복합 Bearer 규약 [v1.2 신설]**: callback 모드에서 클라이언트는 `Authorization: Bearer <join_code>:<send_password>` 로 보낸다(콜론 구분). field-server 가 분리해 §3 콜백으로 검증 — 어느 라이브의 요청인지 식별하기 위함(단일 룸 구조에서 라이브 식별자 전달 경로). 앱 field_api 는 password 인자에 복합 문자열을 넣으면 프로토콜 무변경.
 - 무전기 상한: `INTERCOM_MAX_PARTICIPANTS` env 화 — 클라우드 100, 내부망 기본 8 유지.
-- 사용량: 채널 close 시 §4 로 push(실패 시 로컬 원장 유지, 재전송 큐 없음).
+- 사용량: 참가자 세션 단위로 모아 60초 주기 배치로 §4 push [v1.6 구현 — 상세는 §4 "보고 단위·시점"].
+  실패 시 로컬 원장(`usage_sessions`·`signal_events`)에 남고 다음 주기에 재시도한다.
