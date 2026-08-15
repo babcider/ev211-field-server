@@ -189,3 +189,36 @@ def test_webhook_relay_room_still_enforced(state):
     bad = "intruder-1"
     _run(proc.handle(_event("participant_joined", bad, "rl1", state.room)))
     assert (state.room, bad) in state.livekit.removed
+
+
+# ---- FIELD_INTERCOM_MAX env 오버라이드 (클라우드 무전기 100명 — LIVE_PLAN §4) ----
+
+_BASE_ENV = {
+    "FIELD_SEND_PASSWORD": "sendpw123",
+    "FIELD_ADMIN_PASSWORD": "adminpw456",
+    "LIVEKIT_API_KEY": API_KEY,
+    "LIVEKIT_API_SECRET": API_SECRET,
+}
+
+
+def test_intercom_max_default_is_eight():
+    from app.config import load_settings
+
+    assert load_settings(dict(_BASE_ENV)).intercom_max == INTERCOM_MAX_PARTICIPANTS == 8
+
+
+def test_intercom_max_env_override_to_hundred():
+    from app.config import load_settings
+
+    s = load_settings({**_BASE_ENV, "FIELD_INTERCOM_MAX": "100"})
+    assert s.intercom_max == 100
+
+
+def test_intercom_max_rejects_out_of_range_and_non_int():
+    import pytest
+
+    from app.config import ConfigError, load_settings
+
+    for bad in ("101", "1", "0", "-3", "abc"):
+        with pytest.raises(ConfigError):
+            load_settings({**_BASE_ENV, "FIELD_INTERCOM_MAX": bad})

@@ -11,7 +11,8 @@ SUBSCRIBE_TTL_SECONDS = 600  # 수신 토큰 TTL 10분
 PUBLISH_TTL_SECONDS = 3600  # 송신 토큰 TTL 1시간(= lease TTL)
 MONITOR_TTL_SECONDS = 600  # 관리자 모니터 토큰 TTL 10분(만료 시 재발급·재접속)
 INTERCOM_TTL_SECONDS = 3600  # 인터컴(PTT) 토큰 TTL 1시간(끊기면 재발급·재접속)
-INTERCOM_MAX_PARTICIPANTS = 8  # 인터컴 룸 참가 상한(발급 시점 검사)
+INTERCOM_MAX_PARTICIPANTS = 8  # 인터컴 룸 참가 상한 기본값(FIELD_INTERCOM_MAX 로 오버라이드, 상한 100)
+INTERCOM_MAX_PARTICIPANTS_CAP = 100  # env 오버라이드 허용 상한(클라우드 무전기 100명 — LIVE_PLAN §4)
 INTERCOM_MAX_CHANNELS = 8  # 무전기 채널 최대 개수(0~7)
 LISTENER_HEARTBEAT_TTL_SECONDS = 30  # heartbeat 보관 TTL 30초
 ISSUED_LISTENER_TTL_SECONDS = 3600  # 발급 원장·토큰 근사 카운트 보관 TTL 1시간(만료분 정리)
@@ -78,6 +79,8 @@ class Settings:
     recordings_path: str
     max_channels: int
     forwarded_allow_ips: str  # 신뢰 프록시 IP/CIDR(콤마 구분). X-Forwarded-* 신뢰 판정용.
+    # 인터컴(무전기) 참가 상한 — 내부망 기본 8, 클라우드는 FIELD_INTERCOM_MAX=100 으로 확대.
+    intercom_max: int = INTERCOM_MAX_PARTICIPANTS
     # 모드 C AI 통역 워커가 gpt-realtime-translate WS 에 붙을 때 쓰는 키(선택).
     # 미설정이면 AI 채널 생성만 거부되고 나머지 기능은 정상 동작한다.
     openai_api_key: str = ""
@@ -141,6 +144,13 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     if not 1 <= max_channels <= MAX_CHANNELS_CAP:
         raise ConfigError(f"MAX_CHANNELS 는 1..{MAX_CHANNELS_CAP} 범위여야 합니다.")
 
+    try:
+        intercom_max = int(e.get("FIELD_INTERCOM_MAX") or INTERCOM_MAX_PARTICIPANTS)
+    except ValueError as exc:
+        raise ConfigError("FIELD_INTERCOM_MAX 는 정수여야 합니다.") from exc
+    if not 2 <= intercom_max <= INTERCOM_MAX_PARTICIPANTS_CAP:
+        raise ConfigError(f"FIELD_INTERCOM_MAX 는 2..{INTERCOM_MAX_PARTICIPANTS_CAP} 범위여야 합니다.")
+
     return Settings(
         livekit_api_key=api_key,
         livekit_api_secret=api_secret,
@@ -154,4 +164,5 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         max_channels=max_channels,
         forwarded_allow_ips=forwarded_allow,
         openai_api_key=openai_api_key,
+        intercom_max=intercom_max,
     )

@@ -20,7 +20,6 @@ from .config import (
     AI_WORKER_STOP_TIMEOUT_SECONDS,
     FLOOR_CHANNEL_ID,
     INTERCOM_MAX_CHANNELS,
-    INTERCOM_MAX_PARTICIPANTS,
     LEASE_JOIN_GRACE_SECONDS,
     LISTENER_HEARTBEAT_TTL_SECONDS,
     PUBLISH_TTL_SECONDS,
@@ -807,10 +806,10 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
             except Exception:
                 # 조회 실패를 0명으로 간주하면 상한이 우회되므로 발급을 거부한다(fail-closed).
                 return _err("livekit_error", "인터컴 상태 확인에 실패했습니다. 다시 시도하세요.", 502)
-            if _intercom_user_count(participants) >= INTERCOM_MAX_PARTICIPANTS:
+            if _intercom_user_count(participants) >= st.settings.intercom_max:
                 return _err(
                     "intercom_full",
-                    f"인터컴 정원({INTERCOM_MAX_PARTICIPANTS}명)이 가득 찼습니다.",
+                    f"인터컴 정원({st.settings.intercom_max}명)이 가득 찼습니다.",
                     409,
                 )
             token, identity, track = issue_intercom_token(
@@ -966,10 +965,10 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
                 participants = await st.livekit.list_participants(room)
             except Exception:
                 return _err("livekit_error", "채널 상태 확인에 실패했습니다. 다시 시도하세요.", 502)
-            if _intercom_user_count(participants) >= INTERCOM_MAX_PARTICIPANTS:
+            if _intercom_user_count(participants) >= st.settings.intercom_max:
                 return _err(
                     "intercom_full",
-                    f"채널 정원({INTERCOM_MAX_PARTICIPANTS}명)이 가득 찼습니다.",
+                    f"채널 정원({st.settings.intercom_max}명)이 가득 찼습니다.",
                     409,
                 )
             token, identity, track = issue_intercom_token(

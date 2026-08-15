@@ -10,7 +10,6 @@ from .config import (
     ADMIN_LOCK_SECONDS,
     ADMIN_RL_PER_MINUTE,
     HEARTBEAT_RL_PER_MINUTE,
-    INTERCOM_MAX_PARTICIPANTS,
     PUBLISH_FAIL_LIMIT,
     PUBLISH_LOCK_SECONDS,
     PUBLISH_RL_PER_MINUTE,
@@ -198,8 +197,8 @@ class AppState:
             await self.livekit.create_room(
                 self.intercom_room,
                 empty_timeout=ROOM_EMPTY_TIMEOUT_SECONDS,
-                # 사용자 8명 + 관리자 모니터 1명 + 서버 녹음 1명.
-                max_participants=INTERCOM_MAX_PARTICIPANTS + 2,
+                # 사용자 상한(settings.intercom_max) + 관리자 모니터 1명 + 서버 녹음 1명.
+                max_participants=self.settings.intercom_max + 2,
             )
 
     def intercom_channel_room(self, channel_id: int) -> str:
@@ -219,8 +218,8 @@ class AppState:
             await self.livekit.create_room(
                 room,
                 empty_timeout=ROOM_EMPTY_TIMEOUT_SECONDS,
-                # 사용자 8명 + 관리자 모니터 1명 + 서버 녹음 1명.
-                max_participants=INTERCOM_MAX_PARTICIPANTS + 2,
+                # 사용자 상한(settings.intercom_max) + 관리자 모니터 1명 + 서버 녹음 1명.
+                max_participants=self.settings.intercom_max + 2,
             )
 
     @property
