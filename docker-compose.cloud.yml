@@ -18,3 +18,8 @@ services:
 
   # field-api·caddy 는 host 오버레이 구성 그대로(브리지 네트워크·루프백 웹훅 경유).
   # Caddy field.ev211.com 공인 TLS 블록은 DNS 전환 후 Caddyfile 에 추가한다(현재 자체서명 8443 유지).
+  field-api:
+    environment:
+      # 클라우드 무전기 참가 상한(LIVE_PLAN §4). base compose 에 없는 변수는 여기서 전달해야
+      # 컨테이너에 주입된다(.env 에만 있으면 무시됨 — OPENAI_API_KEY 결함과 동일 함정).
+      FIELD_INTERCOM_MAX: "${FIELD_INTERCOM_MAX:-100}"
