@@ -78,13 +78,21 @@
 ## 6. 라이브 개설/관리 — 앱 (Bearer device_token)
 
 - `POST /api/app/lives`  body `{"title":"...", "target_languages":["en","ja"], "intercom_enabled": true}`
-  → 201 `{"service_id", "join_code", "send_password", "transport":"sfu", "field_server_url", "field_ws_url", "source_language":{...}, "languages":[...]}`
-- `GET /api/app/lives` → 내 교회의 최근 라이브 목록(제목·코드·상태·started_at)
-- `POST /api/app/lives/:id/stop` → 200 (라이브 종료)
+  → 201 `{"service_id", "title", "join_code", "send_password", "transport":"sfu", "field_server_url", "field_ws_url", "source_language":{...}, "languages":[...]}` [v1.2: title 추가]
+- `GET /api/app/lives` → 200 `{"lives": [{"service_id","title","join_code","status","started_at"}, ...]}` [v1.2: 래핑 키 `lives` 확정]
+- `POST /api/app/lives/:id/stop` — **`:id` = `service_id`** → 200 `{"service_id","status","ended_at"}` [v1.2 확정]
 - 401: device_token 무효/회수됨.
+- 참고: 앱은 `field_ws_url` 을 직접 쓰지 않는다(LiveKit URL 은 field-server 토큰 응답 `grant.url` 로 수신). 값은 유지(웹·진단용).
+
+## 6a. QR 페이로드 규약 [v1.2 신설]
+
+- **송신자용 QR**: `ev211field://live?code=<접속코드>&pw=<송신비번>` — 앱 개설 완료 화면이 생성. OS 카메라 스캔 → 딥링크로 앱 진입(인앱 스캐너 없음 — 스토어 제출된 네이티브 설정 보존 결정).
+- **수신용 QR(앱 대상)**: `ev211field://live?code=<접속코드>` (pw 없음).
+- 기존 웹 청취 QR(`https://ev211.com/listen/<stream_key>`)은 브라우저 청취용으로 병행 유지. 웹·Edge 가 앱 대상 QR 을 생성할 때는 위 스킴을 따른다.
 
 ## 7. field-server 측 (참고 — field-server 작업분)
 
 - 송신 계열 인증: `FIELD_SEND_AUTH_MODE=callback` 시 §3 콜백으로 라이브별 비번 검증(5분 긍정 캐시).
+- **복합 Bearer 규약 [v1.2 신설]**: callback 모드에서 클라이언트는 `Authorization: Bearer <join_code>:<send_password>` 로 보낸다(콜론 구분). field-server 가 분리해 §3 콜백으로 검증 — 어느 라이브의 요청인지 식별하기 위함(단일 룸 구조에서 라이브 식별자 전달 경로). 앱 field_api 는 password 인자에 복합 문자열을 넣으면 프로토콜 무변경.
 - 무전기 상한: `INTERCOM_MAX_PARTICIPANTS` env 화 — 클라우드 100, 내부망 기본 8 유지.
 - 사용량: 채널 close 시 §4 로 push(실패 시 로컬 원장 유지, 재전송 큐 없음).
