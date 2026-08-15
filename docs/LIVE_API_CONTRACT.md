@@ -104,6 +104,20 @@
 - 인증은 전부 복합 Bearer. idle 가드(10분)로 닫힌 AI 채널은 송신 재진입 시 같은 절차로 재개설된다.
 - 인간 통역사 송신 화면의 언어 선택지는 **라이브의 언어 목록(원어+통역 언어)으로 제한**한다 — 전체 ISO 목록(첫 항목 Abkhazian 폴백) 금지.
 
+## 6c. AI 통역 언어 카탈로그 + 자막 [v1.5 신설]
+
+**AI 언어 카탈로그(단일 소스)**: field-server `AI_SUPPORTED_OUTPUT_LANGUAGES` 13종 — `es pt fr ja ru zh de ko hi id vi it en` (단순 ISO 639-1 표기. `zh-CN` 같은 지역 변형 금지 — 표시는 "중국어(보통화)" 등 라벨로).
+- 앱 라이브 개설 화면의 AI 언어 선택지는 **이 13종(원어 제외)만** 노출한다. 전체 ISO 목록 금지.
+- Rails `POST /api/app/lives` 는 카탈로그 밖 코드가 섞이면 **422 로 명시 거부**한다(조용한 필터 탈락 금지 — zh-CN 누락 사고의 재발 방지). 오류 바디에 어떤 코드가 거부됐는지 포함.
+
+**자막(data track)**: AI 워커가 LiveKit data(topic `captions`, reliable)로 발행. 페이로드:
+```json
+{"channel_id": 1, "track_name": "ch-01", "kind": "source|target",
+ "language": "en",           // kind=target 일 때만, source 는 null
+ "seq": 12, "delta": "Hello "}
+```
+- sfu 수신 화면은 `captions` topic 을 구독해 **kind=target && language==선택 언어** 의 delta 를 seq 순으로 이어붙여 하단 자막으로 표시한다(롤링, 최근 발화 유지). 원문(source) 자막은 토글 옵션(기본 꺼짐).
+
 ## 7. field-server 측 (참고 — field-server 작업분)
 
 - 송신 계열 인증: `FIELD_SEND_AUTH_MODE=callback` 시 §3 콜백으로 라이브별 비번 검증(5분 긍정 캐시).
