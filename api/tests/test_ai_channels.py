@@ -836,3 +836,25 @@ def test_cascade_skips_reused_slot(ai_client, send_headers, monkeypatch):
     closed = _run(_close_dependent_ai_channels(st, 3))
     assert closed == []  # 재사용된 사람 채널을 닫지 않았다
     assert st.db.get_channel(1).state == "open"  # 그대로 열림
+
+
+# ---- zh-CN 카탈로그 코드(계약 §6c v1.5.1) ----
+
+def test_ai_channel_body_accepts_zh_cn_and_rejects_zh_tw():
+    from pydantic import ValidationError
+
+    from app.main import AiChannelCreateBody
+
+    assert AiChannelCreateBody(target_language="zh-cn").target_language == "zh-CN"
+    assert AiChannelCreateBody(target_language="ZH-CN").target_language == "zh-CN"
+    try:
+        AiChannelCreateBody(target_language="zh-TW")
+        raise AssertionError("zh-TW 는 거부되어야 한다")
+    except ValidationError:
+        pass
+
+
+def test_model_language_map_zh_cn_to_zh():
+    from app.config import AI_MODEL_LANGUAGE_MAP
+
+    assert AI_MODEL_LANGUAGE_MAP.get("zh-CN") == "zh"

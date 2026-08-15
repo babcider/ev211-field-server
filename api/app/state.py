@@ -18,6 +18,7 @@ from .config import (
     SUBSCRIBE_RL_PER_MINUTE,
     Settings,
 )
+from .config import AI_MODEL_LANGUAGE_MAP  # noqa: E501 — 워커 언어 매핑(§6c)
 from .live_auth import LiveSendVerifier
 from .db import Database, new_nonce
 from .identity import parse_speaker_identity
@@ -455,7 +456,8 @@ class AppState:
                 provider = self.ai_token_provider(cid)
                 params = AiWorkerParams(
                     channel_id=cid,
-                    target_language=ch.target_language or "",
+                    # 채널 표기(zh-CN 등 카탈로그 코드)를 모델 코드로 매핑해 세션에 넘긴다(§6c).
+                target_language=AI_MODEL_LANGUAGE_MAP.get(ch.target_language or "", ch.target_language or ""),
                     rtc_url=self.settings.livekit_rtc_url,
                     token=await provider(),  # 최초 접속 토큰(+lease 재획득)
                     room=self.room,

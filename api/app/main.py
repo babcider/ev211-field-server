@@ -16,7 +16,7 @@ from .config import (
     AI_IDLE_CHECK_SECONDS,
     AI_IDLE_CLOSE_SECONDS,
     AI_READY_TIMEOUT_SECONDS,
-    AI_SUPPORTED_OUTPUT_LANGUAGES,
+    AI_CATALOG_LANGUAGES,
     AI_WORKER_STOP_TIMEOUT_SECONDS,
     FLOOR_CHANNEL_ID,
     INTERCOM_MAX_CHANNELS,
@@ -81,8 +81,10 @@ class AiChannelCreateBody(BaseModel):
     @field_validator("target_language")
     @classmethod
     def _lang(cls, v: str) -> str:
-        v = v.strip().lower()
-        if v not in AI_SUPPORTED_OUTPUT_LANGUAGES:
+        # BCP-47 정규형(언어 소문자, 지역 대문자)으로 맞춘 뒤 카탈로그(§6c) 검증.
+        lang, _, region = v.strip().partition("-")
+        v = lang.lower() + (f"-{region.upper()}" if region else "")
+        if v not in AI_CATALOG_LANGUAGES:
             raise ValueError("지원하지 않는 번역 목표 언어입니다.")
         return v
 

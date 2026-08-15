@@ -46,6 +46,11 @@ AI_IDLE_CHECK_SECONDS = 60.0  # idle 스윕 주기
 AI_SUPPORTED_OUTPUT_LANGUAGES = frozenset(
     {"es", "pt", "fr", "ja", "ru", "zh", "de", "ko", "hi", "id", "vi", "it", "en"}
 )
+# 카탈로그(BCP-47) → 모델 코드 매핑(계약 §6c v1.5.1). 채널 표기는 카탈로그 코드를 유지하고
+# gpt-realtime-translate 세션에만 모델 코드를 넘긴다. zh-TW 등 모델 미지원 변형은 카탈로그에 없다.
+AI_MODEL_LANGUAGE_MAP = {"zh-CN": "zh"}
+# 외부(앱·Rails)에 허용하는 카탈로그 코드 = 모델 13종 + 매핑 키. "zh" 직접 지정도 하위호환 허용.
+AI_CATALOG_LANGUAGES = frozenset(AI_SUPPORTED_OUTPUT_LANGUAGES | set(AI_MODEL_LANGUAGE_MAP))
 
 # 기본값(변경 강제 대상). .env.example 의 자리표시자를 기동 시 거부한다.
 _DEFAULT_PASSWORDS = {"change-me", "changeme", "", "password", "default"}
