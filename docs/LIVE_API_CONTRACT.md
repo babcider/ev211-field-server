@@ -84,11 +84,15 @@
 - 401: device_token 무효/회수됨.
 - 참고: 앱은 `field_ws_url` 을 직접 쓰지 않는다(LiveKit URL 은 field-server 토큰 응답 `grant.url` 로 수신). 값은 유지(웹·진단용).
 
-## 6a. QR 페이로드 규약 [v1.2 신설]
+## 6a. QR 페이로드 규약 [v1.3 개정 — 강의실 시나리오 확정]
 
-- **송신자용 QR**: `ev211field://live?code=<접속코드>&pw=<송신비번>` — 앱 개설 완료 화면이 생성. OS 카메라 스캔 → 딥링크로 앱 진입(인앱 스캐너 없음 — 스토어 제출된 네이티브 설정 보존 결정).
-- **수신용 QR(앱 대상)**: `ev211field://live?code=<접속코드>` (pw 없음).
-- 기존 웹 청취 QR(`https://ev211.com/listen/<stream_key>`)은 브라우저 청취용으로 병행 유지. 웹·Edge 가 앱 대상 QR 을 생성할 때는 위 스킴을 따른다.
+- **수신용 QR**: `https://ev211.com/live/<접속코드>` — **유니버설/앱 링크**. 기본 카메라 스캔 시 앱 설치자는 앱이 열려 해당 라이브 참여, 미설치자는 브라우저로 열려 웹 청취 페이지로 리다이렉트. 웹·Edge·앱 개설 화면 모두 이 포맷으로 생성.
+  - Rails: `GET /live/:code`(대소문자 무관) → 302 `/listen/<stream_key>`(웹 폴백), 404 시 안내.
+  - iOS: Associated Domains `applinks:ev211.com` + `/.well-known/apple-app-site-association`(appID `M44T8AR75V.com.ev211.ev211Mobile`, paths `/live/*`).
+  - Android: App Links intent-filter(autoVerify) + `/.well-known/assetlinks.json`(package `com.ev211.ev211_mobile`, 지문은 슈퍼어드민 설정 — Play 서명 지문은 콘솔에서 확인해 입력).
+- **송신자용 QR**: `ev211field://live?code=<접속코드>&pw=<송신비번>` 유지 — 앱 전용. 송신 비번을 https URL 에 싣지 않는다(미설치 단말이 스캔하면 웹 서버 로그에 비번이 남기 때문).
+- **인앱 스캐너**: 앱은 OS 카메라 외에 인앱 QR 스캐너(mobile_scanner)도 제공 [v1.3 결정 — iOS 배포 타깃 15.5 상향·카메라 권한 문구 수반]. 두 포맷(https·ev211field) 모두 해석.
+- 구 스킴 `ev211field://live?code=...`(수신용)도 앱은 계속 해석한다(하위 호환).
 
 ## 7. field-server 측 (참고 — field-server 작업분)
 
