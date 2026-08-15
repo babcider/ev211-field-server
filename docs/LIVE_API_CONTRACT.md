@@ -106,7 +106,7 @@
 
 ## 6c. AI 통역 언어 카탈로그 + 자막 [v1.5 신설]
 
-**AI 언어 카탈로그(단일 소스)**: field-server `AI_SUPPORTED_OUTPUT_LANGUAGES` 13종 — `es pt fr ja ru zh de ko hi id vi it en` (단순 ISO 639-1 표기. `zh-CN` 같은 지역 변형 금지 — 표시는 "중국어(보통화)" 등 라벨로).
+**AI 언어 카탈로그(단일 소스)** [v1.5.1 개정 — 사용자 결정: 중국어는 지역 변형 코드]: 카탈로그 코드는 BCP-47 표기를 쓴다 — `es pt fr ja ru de ko hi id vi it en` + **`zh-CN`(중국어·보통화)**. field-server 가 모델 호출 시 `zh-CN → zh` 로 매핑한다(매핑 테이블은 field-server 소유). `zh-TW`(번체)·`zh-HK`(광둥어)는 실시간 모델이 음성 미지원이라 **카탈로그에 넣지 않는다**(조용한 실패 재발 방지) — Edge 정밀 경로(TTS 선택 가능)가 담당하고, 모델 지원 시 카탈로그에 추가한다.
 - 앱 라이브 개설 화면의 AI 언어 선택지는 **이 13종(원어 제외)만** 노출한다. 전체 ISO 목록 금지.
 - Rails `POST /api/app/lives` 는 카탈로그 밖 코드가 섞이면 **422 로 명시 거부**한다(조용한 필터 탈락 금지 — zh-CN 누락 사고의 재발 방지). 오류 바디에 어떤 코드가 거부됐는지 포함.
 
