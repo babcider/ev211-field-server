@@ -40,6 +40,7 @@
 - `listener_join_code`: 신형식 재발급(기존 숫자 코드 전부 신형식으로 교체 — 데이터 마이그레이션)
 - `live_send_password` (string, 숫자 6자리): listener_enabled 활성 시 join_code 와 함께 발급
 - `live_transport` (string, default "chunk", null: false)
+- `live_intercom_enabled` (boolean, default false) — §6 요청 필드 저장(과금·모니터링 근거). [v1.1 추가]
 
 ## 3. 송신 비번 검증 콜백 — field-server → Rails
 
@@ -48,7 +49,7 @@
 {"join_code": "K3M7PQ", "send_password": "483920"}
 ```
 - 200 `{"ok": true, "service_id": 12, "church_id": 3, "title": "..."}`
-- 403 `{"ok": false, "reason": "invalid_password"}` / 404 코드 없음·비활성 / 401 시크릿 불일치
+- 403 `{"ok": false, "reason": "invalid_password"}` / 404 `{"ok": false, "reason": "not_found"}`(코드 없음·비활성) / 401 시크릿 불일치 [v1.1: 404 바디 명시]
 
 ## 4. 사용량 수집 — field-server → Rails (모니터링 데이터원)
 
@@ -61,7 +62,8 @@
   "participant_hash": "b616875b"               // 개인 식별 아님, 세션 dedup 용
 }]}
 ```
-- 201. Rails 는 join_code → service/church 를 해석해 `field_usage_records` 저장(유저별=church별, 시간대별 집계의 원천).
+- 201 `{"accepted": n, "skipped": n}` — field-server 의 로컬 원장 정리 판단 근거. [v1.1: 응답 바디 명시]
+- Rails 는 join_code → service/church 를 해석해 `field_usage_records` 저장(유저별=church별, 시간대별 집계의 원천).
 
 ## 5. 기기 승인(디바이스 연동) — 앱 로그인 대체
 
