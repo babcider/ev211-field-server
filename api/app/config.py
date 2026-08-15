@@ -81,6 +81,11 @@ class Settings:
     forwarded_allow_ips: str  # 신뢰 프록시 IP/CIDR(콤마 구분). X-Forwarded-* 신뢰 판정용.
     # 인터컴(무전기) 참가 상한 — 내부망 기본 8, 클라우드는 FIELD_INTERCOM_MAX=100 으로 확대.
     intercom_max: int = INTERCOM_MAX_PARTICIPANTS
+    # 송신 계열 인증 모드(라이브 API 계약 §7): password(전역 비번)|callback(ev211.com 위임)|both.
+    send_auth_mode: str = "password"
+    # callback 모드에서 verify_send 콜백 대상·시크릿(양측 .env 동일값).
+    ev211_api_base: str = ""
+    field_callback_secret: str = ""
     # 모드 C AI 통역 워커가 gpt-realtime-translate WS 에 붙을 때 쓰는 키(선택).
     # 미설정이면 AI 채널 생성만 거부되고 나머지 기능은 정상 동작한다.
     openai_api_key: str = ""
@@ -151,6 +156,16 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     if not 2 <= intercom_max <= INTERCOM_MAX_PARTICIPANTS_CAP:
         raise ConfigError(f"FIELD_INTERCOM_MAX 는 2..{INTERCOM_MAX_PARTICIPANTS_CAP} 범위여야 합니다.")
 
+    send_auth_mode = (e.get("FIELD_SEND_AUTH_MODE") or "password").strip().lower()
+    if send_auth_mode not in ("password", "callback", "both"):
+        raise ConfigError("FIELD_SEND_AUTH_MODE 는 password|callback|both 중 하나여야 합니다.")
+    ev211_api_base = (e.get("EV211_API_BASE") or "").strip()
+    field_callback_secret = (e.get("FIELD_CALLBACK_SECRET") or "").strip()
+    if send_auth_mode in ("callback", "both") and (not ev211_api_base or not field_callback_secret):
+        raise ConfigError(
+            "FIELD_SEND_AUTH_MODE=callback|both 에는 EV211_API_BASE 와 FIELD_CALLBACK_SECRET 가 필요합니다."
+        )
+
     return Settings(
         livekit_api_key=api_key,
         livekit_api_secret=api_secret,
@@ -165,4 +180,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         forwarded_allow_ips=forwarded_allow,
         openai_api_key=openai_api_key,
         intercom_max=intercom_max,
+        send_auth_mode=send_auth_mode,
+        ev211_api_base=ev211_api_base,
+        field_callback_secret=field_callback_secret,
     )

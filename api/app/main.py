@@ -410,6 +410,21 @@ def _auth_bearer(authorization: str | None, expected: str) -> bool:
     return _secrets.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
 
 
+async def _auth_send(st: AppState, authorization: str | None) -> bool:
+    """송신 계열 인증(계약 §7) — FIELD_SEND_AUTH_MODE 에 따라 분기한다.
+
+    - password|both: 전역 송신 비번 상수시간 비교(기존 동작).
+    - callback|both: 복합 Bearer(`<join_code>:<send_password>`)를 ev211.com 콜백으로 검증
+      (5분 긍정 캐시). 콜백 불가·오류는 False(fail-closed).
+    """
+    mode = st.settings.send_auth_mode
+    if mode in ("password", "both") and _auth_bearer(authorization, st.send_password):
+        return True
+    if st.live_verifier is not None:
+        return await st.live_verifier.verify(_bearer(authorization))
+    return False
+
+
 def _intercom_user_count(participants: list) -> int:
     """관리자 모니터·서버 녹음을 제외한 실제 무전기 사용자 수를 센다."""
     return sum(1 for p in participants if str(getattr(p, "identity", "")).startswith("intercom-"))
@@ -523,7 +538,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         ok, rretry = st.publish_rl.check(ip)
         if not ok:
             return _err("rate_limited", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.", 429, rretry)
-        if not _auth_bearer(authorization, st.send_password):
+        if not await _auth_send(st, authorization):
             st.publish_lock.record_failure(ip)
             return _err("unauthorized", "인증이 필요합니다.", 401)
         st.publish_lock.record_success(ip)
@@ -572,7 +587,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         if not ok:
             return _err("rate_limited", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.", 429, rretry)
         # 송신자 비밀번호 외에 관리자 비밀번호로도 허용한다(관리자 메뉴의 채널 삭제).
-        is_send_auth = _auth_bearer(authorization, st.send_password)
+        is_send_auth = await _auth_send(st, authorization)
         is_admin_auth = _auth_bearer(authorization, st.admin_password)
         if not (is_send_auth or is_admin_auth):
             st.publish_lock.record_failure(ip)
@@ -589,7 +604,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         # 회전을 배제한다 — 구 비밀번호 요청이 송신자를 끊는 것을 막는다.
         async with st.rotation_lock:
             # 락 획득 후 인증·초기 비밀번호 게이트 재검증(14차 #2).
-            is_send_auth = _auth_bearer(authorization, st.send_password)
+            is_send_auth = await _auth_send(st, authorization)
             is_admin_auth = _auth_bearer(authorization, st.admin_password)
             if not (is_send_auth or is_admin_auth):
                 return _err("unauthorized", "인증이 필요합니다.", 401)
@@ -705,7 +720,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         ok, rretry = st.publish_rl.check(ip)
         if not ok:
             return _err("rate_limited", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.", 429, rretry)
-        if not _auth_bearer(authorization, st.send_password):
+        if not await _auth_send(st, authorization):
             st.publish_lock.record_failure(ip)
             return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
         st.publish_lock.record_success(ip)
@@ -718,7 +733,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         # 배제한다. 락 순서는 회전 락 → 채널 락(역순 없음 → 데드락 불가).
         async with st.rotation_lock:
             # 락 획득 후 인증 재검증: 대기 중 송신자 비밀번호가 회전되었으면 거부한다.
-            if not _auth_bearer(authorization, st.send_password):
+            if not await _auth_send(st, authorization):
                 return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
             # #2: 채널 락으로 lease 발급 임계 구역(존재 확인·present 조회·acquire)을 직렬화한다 —
             # close/takeover 의 RemoveParticipant~상태 전이 도중에 새 lease 가 발급되지 않게 한다.
@@ -791,14 +806,14 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         ok, rretry = st.publish_rl.check(ip)
         if not ok:
             return _err("rate_limited", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.", 429, rretry)
-        if not _auth_bearer(authorization, st.send_password):
+        if not await _auth_send(st, authorization):
             st.publish_lock.record_failure(ip)
             return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
         st.publish_lock.record_success(ip)
 
         # 회전 락: 세대 회전 중 구세대 인터컴 룸 재생성·구세대 기준 발급을 막는다.
         async with st.rotation_lock:
-            if not _auth_bearer(authorization, st.send_password):
+            if not await _auth_send(st, authorization):
                 return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
             try:
                 await st.ensure_intercom_room()
@@ -830,7 +845,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
             return intercom_response(token, st.generation, st.settings.ws_url, identity, track)
 
     # ---- intercom channels (무전기 채널) ----
-    def _intercom_auth(request: Request, authorization: str | None):
+    async def _intercom_auth(request: Request, authorization: str | None):
         """무전기 채널 API 공통 가드: https 강제 + 잠금/율제한 + 송신자 비밀번호 인증.
 
         통과 시 None, 실패 시 오류 응답을 반환한다. 송신 계열과 동일한 보호를 쓴다.
@@ -846,7 +861,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         ok, rretry = st.publish_rl.check(ip)
         if not ok:
             return _err("rate_limited", "시도가 너무 많습니다. 잠시 후 다시 시도하세요.", 429, rretry)
-        if not _auth_bearer(authorization, st.send_password):
+        if not await _auth_send(st, authorization):
             st.publish_lock.record_failure(ip)
             return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
         st.publish_lock.record_success(ip)
@@ -865,7 +880,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
     ):
         """무전기 채널 목록 — 송신자 비밀번호 인증(무전기 진입 검증 겸용)."""
         st = _st(request)
-        denied = _intercom_auth(request, authorization)
+        denied = await _intercom_auth(request, authorization)
         if denied is not None:
             return denied
         channels = [_intercom_channel_view(st, r) for r in st.db.list_intercom_channels()]
@@ -879,11 +894,11 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
     ):
         """무전기 채널 개설 — 이름(필수)·비밀번호(선택). 가장 낮은 빈 슬롯(0~7)에 배정."""
         st = _st(request)
-        denied = _intercom_auth(request, authorization)
+        denied = await _intercom_auth(request, authorization)
         if denied is not None:
             return denied
         async with st.rotation_lock:
-            if not _auth_bearer(authorization, st.send_password):
+            if not await _auth_send(st, authorization):
                 return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
             cid = st.db.lowest_free_intercom_slot(INTERCOM_MAX_CHANNELS)
             if cid is None:
@@ -914,7 +929,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         import asyncio
 
         st = _st(request)
-        denied = _intercom_auth(request, authorization)
+        denied = await _intercom_auth(request, authorization)
         if denied is not None:
             return denied
 
@@ -950,7 +965,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
 
         # ── 토큰 발급(회전 락으로 세대 정합 보장, 비번 검증은 위에서 완료) ──
         async with st.rotation_lock:
-            if not _auth_bearer(authorization, st.send_password):
+            if not await _auth_send(st, authorization):
                 return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
             # 회전 대기 사이 채널이 폐기(세대 회전)됐을 수 있으므로 재확인 + 검증 시점과
             # 세대·비번 해시가 동일한지 대조한다(24차 TOCTOU). 불일치면 발급을 거부한다.
@@ -1019,14 +1034,14 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
         webhook 강제(speaker identity·트랙명·lease 검증)를 그대로 통과한다.
         """
         st = _st(request)
-        denied = _intercom_auth(request, authorization)
+        denied = await _intercom_auth(request, authorization)
         if denied is not None:
             return denied
         if not st.settings.openai_api_key:
             return _err("ai_unavailable", "OpenAI 키가 설정되지 않아 AI 통역을 사용할 수 없습니다.", 503)
         ip = _ip(request, st)
         async with st.rotation_lock:
-            if not _auth_bearer(authorization, st.send_password):
+            if not await _auth_send(st, authorization):
                 return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
             cid = st.db.lowest_free_general_slot(st.settings.max_channels)
             if cid is None:
@@ -1143,11 +1158,11 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
     ):
         """AI 통역 채널을 종료한다 — 워커 정지(server-first) 후 채널을 닫는다."""
         st = _st(request)
-        denied = _intercom_auth(request, authorization)
+        denied = await _intercom_auth(request, authorization)
         if denied is not None:
             return denied
         async with st.rotation_lock:
-            if not _auth_bearer(authorization, st.send_password):
+            if not await _auth_send(st, authorization):
                 return _err("invalid_password", "비밀번호가 올바르지 않습니다.", 401)
             async with st.channel_lock(channel_id):
                 ch = st.db.get_channel(channel_id)
@@ -1174,7 +1189,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 라우트 집합 �
     ):
         """AI 통역 채널의 워커 헬스(실행 여부·재시작 수·세션 나이·마지막 오디오 시각)를 반환한다."""
         st = _st(request)
-        denied = _intercom_auth(request, authorization)
+        denied = await _intercom_auth(request, authorization)
         if denied is not None:
             return denied
         ch = st.db.get_channel(channel_id)

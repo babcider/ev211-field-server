@@ -18,6 +18,7 @@ from .config import (
     SUBSCRIBE_RL_PER_MINUTE,
     Settings,
 )
+from .live_auth import LiveSendVerifier
 from .db import Database, new_nonce
 from .identity import parse_speaker_identity
 from .livekit_client import LiveKitClient
@@ -74,6 +75,14 @@ class AppState:
         # 여기 값이 갱신된다. 초기값은 DB 오버라이드 우선, 없으면 환경변수(.env).
         self.send_password: str = db.get_setting("send_password") or settings.send_password
         self.admin_password: str = db.get_setting("admin_password") or settings.admin_password
+
+        # 라이브별 송신 비번 콜백 검증기(계약 §7) — callback|both 모드에서만 생성.
+        # 테스트에서는 이 속성을 Fake 로 교체한다.
+        self.live_verifier: LiveSendVerifier | None = (
+            LiveSendVerifier(settings.ev211_api_base, settings.field_callback_secret)
+            if settings.send_auth_mode in ("callback", "both")
+            else None
+        )
 
         # 채널별 asyncio.Lock — close/takeover/publish-token 발급을 채널 단위로 직렬화한다(#2).
         # RemoveParticipant await 와 DB 상태 전이(lease 해제·epoch 증가·재획득) 사이에
