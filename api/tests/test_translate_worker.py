@@ -10,10 +10,13 @@ from app.translate_worker import (
     AiChannelManager,
     AiTranslateChannel,
     AiWorkerParams,
+    SilenceGate,
     TranslateSessionError,
     TranslateWorker,
     decode_output_delta,
     output_frame_samples,
+    pcm_rms,
+    pcm_seconds,
 )
 
 
@@ -879,5 +882,182 @@ def test_reap_reretains_still_alive_task(monkeypatch):
         await asyncio.wait_for(manager._reap_leaked(), timeout=2)
         assert ch._task.done()
         assert ch not in manager._leaked
+
+    _run(body())
+
+
+# ---- T1: 무음 구간 append 게이팅 ----
+GATE_RATE = 24_000
+_GATE_CHUNK_SAMPLES = GATE_RATE // 50  # 20ms
+
+
+def _silence_chunk() -> bytes:
+    return b"\x00\x00" * _GATE_CHUNK_SAMPLES
+
+
+def _loud_chunk(amplitude: int = 3000) -> bytes:
+    import struct
+
+    return struct.pack("<h", amplitude) * _GATE_CHUNK_SAMPLES
+
+
+def _gate(**kw) -> SilenceGate:
+    """20ms 청크 기준으로 유예 5청크(0.1초)·선행 버퍼 3청크(0.06초)인 테스트용 게이트."""
+    opts = {"hangover_seconds": 0.1, "prebuffer_seconds": 0.06, "sample_rate": GATE_RATE}
+    opts.update(kw)
+    return SilenceGate(**opts)
+
+
+async def _settle() -> None:
+    """send 루프가 큐에 쌓인 프레임을 모두 소비할 때까지 이벤트 루프를 양보한다."""
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
+def test_pcm_rms_and_seconds_are_pure():
+    assert pcm_rms(b"") == 0.0
+    assert pcm_rms(_silence_chunk()) == 0.0
+    assert pcm_rms(_loud_chunk(3000)) == pytest.approx(3000.0)
+    assert pcm_rms(b"\x01") == 0.0  # 홀수 바이트 꼬리는 버린다
+    assert pcm_seconds(_silence_chunk(), GATE_RATE) == pytest.approx(0.02)
+
+
+def test_gate_stops_append_after_silence_hangover():
+    """무음만 흐르면 유예 뒤 append 가 멈춘다(T1 완료기준 1)."""
+    gate = _gate()
+    silence = _silence_chunk()
+    emitted = [gate.feed(silence) for _ in range(20)]  # 0.4초 무음
+
+    # 유예(0.1초 = 5청크) 도달 전까지는 짧은 호흡일 수 있으니 그대로 보낸다(보수적).
+    assert emitted[:4] == [[silence]] * 4
+    # 5번째 청크에서 누적 0.1초 → 게이트가 닫히고 이후는 전부 송신 없음.
+    assert emitted[4:] == [[]] * 16
+    assert gate.open is False and gate.closes == 1
+    assert gate.sent_seconds == pytest.approx(0.08)
+    assert gate.gated_seconds == pytest.approx(0.32)
+    assert gate.gated_ratio == pytest.approx(0.8)
+
+
+def test_gate_resumes_with_prebuffer_when_sound_returns():
+    """소리가 돌아오면 선행 버퍼를 포함해 즉시 재개한다 — 발화 첫머리가 잘리지 않는다(완료기준 2)."""
+    gate = _gate()
+    silence, loud = _silence_chunk(), _loud_chunk()
+    for _ in range(20):
+        gate.feed(silence)
+    assert gate.open is False
+
+    out = gate.feed(loud)
+
+    # 선행 버퍼 창(0.06초 = 3청크) + 현재 청크가 한 번에 나간다.
+    assert out == [silence, silence, silence, loud]
+    assert gate.open is True
+    # 플러시된 선행 버퍼는 gated 에서 sent 로 되돌아간다(절감 수치 정합).
+    assert gate.sent_seconds == pytest.approx(0.08 + 0.06 + 0.02)
+    assert gate.gated_seconds == pytest.approx(0.32 - 0.06)
+    # 재개 후 곧바로 다시 닫히지 않는다(무음 누산이 초기화됨).
+    assert gate.feed(silence) == [silence]
+
+
+def test_gate_disabled_passes_everything_through():
+    """AI_GATE_ENABLED=False 면 기존처럼 무음까지 연속 append(회귀 시 되돌리는 스위치)."""
+    gate = _gate(enabled=False)
+    silence = _silence_chunk()
+    assert [gate.feed(silence) for _ in range(20)] == [[silence]] * 20
+    assert gate.open is True and gate.gated_seconds == 0.0
+
+
+def test_gate_does_not_interfere_with_session_renewal(monkeypatch):
+    """게이팅 중 make-before-break 로 교체돼도 재개 오디오는 새 세션으로 온전히 간다(완료기준 3)."""
+    import app.translate_worker as tw
+
+    monkeypatch.setattr(tw, "AI_SESSION_DRAIN_SECONDS", 0.0)
+    silence, loud = _silence_chunk(), _loud_chunk()
+
+    async def body():
+        old, new = FakeSession(), FakeSession()
+        worker = TranslateWorker(_params(), session_factory=lambda: new)
+        worker._session = old
+        worker.gate = _gate()
+        q: asyncio.Queue = asyncio.Queue()
+        send = asyncio.create_task(worker._send_loop(q))
+        try:
+            for _ in range(20):
+                q.put_nowait(FakeAudioFrame_with_data(silence, GATE_RATE))
+            await _settle()
+            assert worker.gate.open is False
+            sent_to_old = len(old.appended)
+            assert sent_to_old == 4  # 유예 전 4청크만 구세션으로 갔다
+
+            # 게이팅 중 세션 교체(둘째 WS 워밍 → 원자 스위치).
+            await worker._renew_session()
+            assert worker._session is new and worker.renewals == 1
+            # 교체가 게이트 상태를 건드리지 않는다(닫힌 채 유지 — 세션은 살아 있다).
+            assert worker.gate.open is False
+
+            # 소리 복귀 — 선행 버퍼 포함해 **새 세션**으로 즉시 재개.
+            q.put_nowait(FakeAudioFrame_with_data(loud, GATE_RATE))
+            await _settle()
+            assert new.appended == [silence, silence, silence, loud]
+            assert len(old.appended) == sent_to_old  # 구세션엔 추가 송신 없음
+        finally:
+            send.cancel()
+            await asyncio.gather(send, return_exceptions=True)
+            await asyncio.gather(*worker._pump_tasks, return_exceptions=True)
+
+    _run(body())
+
+
+class _FloorEvent:
+    def __init__(self, frame):
+        self.frame = frame
+
+
+class FakeFloorStream:
+    """rtc.AudioStream 대역 — 정해진 프레임을 async 순회로 흘려보낸다."""
+
+    def __init__(self, frames):
+        self._frames = list(frames)
+        self._i = 0
+
+    def __aiter__(self):
+        self._i = 0
+        return self
+
+    async def __anext__(self):
+        if self._i >= len(self._frames):
+            raise StopAsyncIteration
+        frame = self._frames[self._i]
+        self._i += 1
+        await asyncio.sleep(0)
+        return _FloorEvent(frame)
+
+
+def test_gating_preserves_floor_frame_receipt_record():
+    """게이팅 중에도 원음 수신 기록은 갱신된다 — idle 가드(floor_idle_seconds) 판정 근거 보존."""
+
+    async def body():
+        session = FakeSession()
+        worker = TranslateWorker(_params(), session_factory=lambda: session)
+        worker._session = session
+        worker.gate = _gate()
+        q: asyncio.Queue = asyncio.Queue()
+        send = asyncio.create_task(worker._send_loop(q))
+        try:
+            stream = FakeFloorStream(
+                [FakeAudioFrame_with_data(_silence_chunk(), GATE_RATE) for _ in range(20)]
+            )
+            await worker._pump_floor(stream, q)
+            await _settle()
+
+            assert worker.gate.open is False  # 송신은 멈췄고
+            assert len(session.appended) == 4  # 유예분만 나갔지만
+            assert worker.last_floor_frame_at is not None  # 수신 기록은 살아 있다
+
+            channel = AiTranslateChannel(1, "en", worker_factory=lambda: worker)
+            channel._worker = worker
+            assert channel.floor_idle_seconds() < 1.0  # → idle 자동 종료로 오판되지 않는다
+        finally:
+            send.cancel()
+            await asyncio.gather(send, return_exceptions=True)
 
     _run(body())

@@ -42,6 +42,19 @@ AI_READY_TIMEOUT_SECONDS = 8.0  # AI 채널 개설 시 워커 최초 접속 준�
 # 채널을 닫지 않으면 토큰이 계속 나간다. 발행자가 사라진 채널은 서버가 스스로 닫는다.
 AI_IDLE_CLOSE_SECONDS = 10 * 60
 AI_IDLE_CHECK_SECONDS = 60.0  # idle 스윕 주기
+# 무음 구간 append 게이팅(T1) — 발행 중이지만 아무도 말하지 않는 시간의 OpenAI 송신을 멈춘다.
+# idle 가드(위)는 '발행자가 사라진' 채널만 닫으므로, 발행 중 침묵(설교 사이 정적·준비 시간)은
+# 그대로 과금된다. 게이팅은 **OpenAI append 만** 멈추고 Floor 프레임 수신 기록
+# (last_floor_frame_at → floor_idle_seconds)과 세션은 그대로 유지한다.
+AI_GATE_ENABLED = True  # False 면 기존처럼 무음까지 연속 append(회귀 시 즉시 되돌리는 스위치)
+# 이 RMS(PCM16) 이하를 '무음'으로 본다. E2E 하니스의 SILENCE_RMS(200)보다 낮게 잡아
+# 조용한 발화가 잘리지 않게 한다(끊김보다 비용 낭비가 안전 — 보수적 기본값).
+AI_GATE_RMS_THRESHOLD = 150.0
+# 무음이 이만큼 이어져야 게이트를 닫는다(짧은 문장 사이 호흡으로 닫히지 않게 넉넉히).
+AI_GATE_HANGOVER_SECONDS = 1.5
+# 게이트가 닫힌 동안 유지하는 선행 버퍼 — 소리가 돌아오면 이 구간을 함께 보내
+# 발화 첫머리(자음 어택)가 잘리지 않게 한다.
+AI_GATE_PREBUFFER_SECONDS = 0.4
 # gpt-realtime-translate 가 출력 가능한 언어 13종(소문자 ISO). 입력은 70+ 언어.
 AI_SUPPORTED_OUTPUT_LANGUAGES = frozenset(
     {"es", "pt", "fr", "ja", "ru", "zh", "de", "ko", "hi", "id", "vi", "it", "en"}

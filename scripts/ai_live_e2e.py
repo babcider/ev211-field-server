@@ -248,6 +248,13 @@ async def main() -> int:
         print(f"[7] 워커: running={worker.get('running')} seq={worker.get('seq')} "
               f"caption_seq={worker.get('caption_seq')} renewals={worker.get('renewals')} "
               f"restarts={worker.get('restart_count')} last_error={worker.get('last_error')}")
+        gate = worker.get("gate") or {}
+        if gate:
+            # 무음 append 게이팅(T1) 절감 수치 — gated_ratio 가 곧 OpenAI 송신 절감분이다.
+            print(f"[7b] 게이팅: enabled={gate.get('enabled')} open={gate.get('open')} "
+                  f"closes={gate.get('closes')} 송신 {gate.get('sent_seconds')}초 / "
+                  f"게이팅 {gate.get('gated_seconds')}초 "
+                  f"→ 절감 {100 * (gate.get('gated_ratio') or 0):.1f}%")
 
         # 6) 판정.
         seconds = len(listener.pcm) / (LISTEN_RATE * 2)

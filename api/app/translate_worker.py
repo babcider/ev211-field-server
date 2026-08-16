@@ -1,11 +1,14 @@
 # 모드 C AI 통역 — 목표 언어 1개를 담당하는 gpt-realtime-translate 번역 워커와 슈퍼바이저
 from __future__ import annotations
 
+import array
 import asyncio
 import base64
 import json
 import logging
+import math
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import AsyncIterator, Awaitable, Callable, Protocol
 
@@ -14,6 +17,10 @@ from livekit import rtc
 from .config import (
     AI_CAPTION_TOPIC,
     AI_FLOOR_SAMPLE_RATE,
+    AI_GATE_ENABLED,
+    AI_GATE_HANGOVER_SECONDS,
+    AI_GATE_PREBUFFER_SECONDS,
+    AI_GATE_RMS_THRESHOLD,
     AI_INPUT_SAMPLE_RATE,
     AI_SESSION_DRAIN_SECONDS,
     AI_SESSION_RENEW_CHECK_SECONDS,
@@ -135,6 +142,150 @@ def output_frame_samples(pcm: bytes) -> int:
     return len(pcm) // (2 * NUM_CHANNELS)
 
 
+def pcm_rms(pcm: bytes) -> float:
+    """mono PCM16 청크의 RMS 를 계산한다(순수). 홀수 바이트 꼬리는 버린다."""
+    usable = len(pcm) - (len(pcm) % 2)
+    if usable == 0:
+        return 0.0
+    samples = array.array("h")
+    samples.frombytes(pcm[:usable])
+    return math.sqrt(sum(s * s for s in samples) / len(samples))
+
+
+def pcm_seconds(pcm: bytes, sample_rate: int = AI_INPUT_SAMPLE_RATE) -> float:
+    """mono PCM16 청크의 재생 길이(초)를 계산한다(순수)."""
+    return (len(pcm) // 2) / float(sample_rate)
+
+
+class SilenceGate:
+    """무음 구간에서 OpenAI append 를 멈추는 게이트(순수 로직 — 시계·소켓 없음).
+
+    과금이 "발화량"이 아니라 "송신이 켜져 있는 시간 × 언어 수"에 비례하므로, 발행 중
+    침묵(설교 사이 정적·준비 시간)의 append 를 건너뛴다. 경과는 실시간 시계가 아니라
+    **오디오 길이**(바이트 수 → 초)로 재서, 프레임이 몰려 들어와도 판정이 흔들리지 않고
+    단위 테스트가 sleep 없이 결정적으로 돌아간다.
+
+    - 임계(RMS) 이하가 hangover 만큼 이어지면 닫는다 — 문장 사이 호흡으로 닫히지 않게 넉넉히.
+    - 닫힌 동안에도 마지막 prebuffer 초 분량은 보관하고, 소리가 돌아오면 **함께** 내보낸다
+      → 발화 첫머리가 잘리지 않는다.
+    - 게이팅은 append 만 멈춘다. 세션·프레임 수신 기록은 호출부가 그대로 유지한다.
+    """
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = AI_GATE_ENABLED,
+        threshold: float = AI_GATE_RMS_THRESHOLD,
+        hangover_seconds: float = AI_GATE_HANGOVER_SECONDS,
+        prebuffer_seconds: float = AI_GATE_PREBUFFER_SECONDS,
+        sample_rate: int = AI_INPUT_SAMPLE_RATE,
+    ) -> None:
+        self.enabled = enabled
+        self.threshold = threshold
+        self.hangover_seconds = hangover_seconds
+        self.prebuffer_seconds = prebuffer_seconds
+        self.sample_rate = sample_rate
+        # 유예·선행 버퍼 창은 **바이트 정수**로 환산해 둔다 — 초 단위 float 누산은 20ms
+        # 프레임을 수천 번 더하면 오차가 쌓여 경계 판정이 흔들린다(창 크기가 1프레임 널뛴다).
+        self._hangover_bytes = int(hangover_seconds * sample_rate) * 2
+        self._prebuffer_max_bytes = int(prebuffer_seconds * sample_rate) * 2
+
+        self.open = True  # 기동 직후는 열린 상태(첫 발화를 놓치지 않게)
+        self.closes = 0  # 게이트가 닫힌 횟수(무음 구간 수)
+        self.sent_bytes = 0  # 실제로 OpenAI 로 보낸 PCM 바이트
+        self.gated_bytes = 0  # 보내지 않고 버린 무음 바이트(= 절감분)
+        self._silence_bytes = 0
+        self._prebuffer: deque[bytes] = deque()
+        self._prebuffer_bytes = 0
+
+    def _to_seconds(self, nbytes: int) -> float:
+        return (nbytes // 2) / float(self.sample_rate)
+
+    @property
+    def sent_seconds(self) -> float:
+        return self._to_seconds(self.sent_bytes)
+
+    @property
+    def gated_seconds(self) -> float:
+        return self._to_seconds(self.gated_bytes)
+
+    @property
+    def total_seconds(self) -> float:
+        return self._to_seconds(self.sent_bytes + self.gated_bytes)
+
+    @property
+    def gated_ratio(self) -> float:
+        """전체 원음 중 송신을 건너뛴 비율(0.0~1.0) — 절감 효과 지표."""
+        total = self.sent_bytes + self.gated_bytes
+        return (self.gated_bytes / total) if total > 0 else 0.0
+
+    def feed(self, pcm: bytes) -> list[bytes]:
+        """PCM 청크 1개를 넣고 **실제로 append 할** 청크 목록을 돌려준다.
+
+        빈 리스트면 게이팅(송신 안 함), 여러 개면 선행 버퍼 플러시를 포함한 재개다.
+        """
+        if not pcm:
+            return []
+        if not self.enabled:
+            self.sent_bytes += len(pcm)
+            return [pcm]
+
+        loud = pcm_rms(pcm) >= self.threshold
+
+        if self.open:
+            if loud:
+                self._silence_bytes = 0
+                self.sent_bytes += len(pcm)
+                return [pcm]
+            self._silence_bytes += len(pcm)
+            if self._silence_bytes < self._hangover_bytes:
+                # 아직 유예 안 — 짧은 호흡일 수 있으니 계속 보낸다(보수적).
+                self.sent_bytes += len(pcm)
+                return [pcm]
+            # 유예 초과 — 게이트를 닫고 이 청크부터 선행 버퍼로 돌린다.
+            self.open = False
+            self.closes += 1
+            self._prebuffer.clear()
+            self._prebuffer_bytes = 0
+            self._buffer(pcm)
+            return []
+
+        # 닫힘 상태.
+        if not loud:
+            self._buffer(pcm)
+            return []
+        # 소리 복귀 — 선행 버퍼(직전 무음 꼬리)와 현재 청크를 함께 즉시 재개한다.
+        self.open = True
+        self._silence_bytes = 0
+        flushed = list(self._prebuffer)
+        # 버퍼에 있던 동안 gated 로 세었던 분량을 sent 로 되돌린다(수치 정합).
+        self.gated_bytes -= self._prebuffer_bytes
+        self.sent_bytes += self._prebuffer_bytes + len(pcm)
+        self._prebuffer.clear()
+        self._prebuffer_bytes = 0
+        flushed.append(pcm)
+        return flushed
+
+    def _buffer(self, pcm: bytes) -> None:
+        """게이팅된 청크를 선행 버퍼에 넣고 창(prebuffer_seconds)을 넘는 만큼 버린다."""
+        self.gated_bytes += len(pcm)
+        self._prebuffer.append(pcm)
+        self._prebuffer_bytes += len(pcm)
+        while self._prebuffer and self._prebuffer_bytes > self._prebuffer_max_bytes:
+            self._prebuffer_bytes -= len(self._prebuffer.popleft())
+
+    def stats(self) -> dict:
+        """status 엔드포인트가 노출하는 게이팅 지표."""
+        return {
+            "enabled": self.enabled,
+            "open": self.open,
+            "closes": self.closes,
+            "sent_seconds": round(self.sent_seconds, 2),
+            "gated_seconds": round(self.gated_seconds, 2),
+            "gated_ratio": round(self.gated_ratio, 4),
+        }
+
+
 # ---- 번역 워커 ----
 @dataclass
 class AiWorkerParams:
@@ -197,6 +348,8 @@ class TranslateWorker:
         # 스위치되어 드레인 중인 구세션(종료 시 반드시 수거 — 소켓 누수 방지).
         self._draining: set[TranslateSession] = set()
         self._caption_failed = False  # 자막 발행 실패 warning 을 1회로 제한
+        # 무음 구간 append 게이팅(T1) — OpenAI 송신만 멈추고 세션·프레임 수신 기록은 유지한다.
+        self.gate = SilenceGate()
 
         # 헬스 지표(슈퍼바이저·status 엔드포인트가 읽는다).
         self.seq: int = 0  # 발행한 번역 오디오 프레임 수(순서·진행 확인용)
@@ -354,12 +507,20 @@ class TranslateWorker:
             floor_frames.put_nowait(frame)
 
     async def _send_loop(self, floor_frames: asyncio.Queue) -> None:
-        """Floor 프레임을 24kHz 로 리샘플해 OpenAI 로 append 한다(무음 포함 연속 전송)."""
+        """Floor 프레임을 24kHz 로 리샘플해 OpenAI 로 append 한다(무음 구간은 게이팅).
+
+        게이트가 닫혀 있으면 append 를 건너뛴다 — 세션은 그대로 살아 있고(재연결 지연이
+        첫 소리 지연으로 직결되므로), Floor 프레임 수신 기록(`last_floor_frame_at`)은
+        `_pump_floor` 가 계속 갱신하므로 idle 가드 판정도 망가지지 않는다.
+        `self._session` 은 매 청크마다 다시 읽는다 — make-before-break 로 교체된 새 세션에
+        곧바로 이어 보내기 위함(선행 버퍼 플러시도 새 세션으로 간다).
+        """
         assert self._session is not None
         while True:
             frame = await floor_frames.get()
             for pcm24k in self._resample_to_24k(frame):
-                await self._session.append_audio(pcm24k)
+                for chunk in self.gate.feed(pcm24k):
+                    await self._session.append_audio(chunk)
 
     def _resample_to_24k(self, frame: "rtc.AudioFrame") -> list[bytes]:
         """Floor 48kHz 프레임을 OpenAI 입력용 24kHz mono PCM16 바이트로 변환한다.
@@ -708,6 +869,8 @@ class AiTranslateChannel:
             "caption_seq": worker.caption_seq if worker else 0,
             "renewals": worker.renewals if worker else 0,
             "renewal_due": worker.renewal_due if worker else False,
+            # 무음 append 게이팅 지표(T1) — 절감 효과·현재 개폐 상태 관측용.
+            "gate": worker.gate.stats() if worker is not None and hasattr(worker, "gate") else None,
         }
 
 

@@ -1606,6 +1606,31 @@ components:
         renewal_due:
           type: boolean
           description: 갱신 시점(T-5분) 도달 여부
+        gate:
+          type: object
+          nullable: true
+          description: |
+            무음 구간 append 게이팅 지표(비용 절감). 게이트가 닫히면 OpenAI 송신만 멈추고
+            세션과 원음 프레임 수신 기록(floor_idle_seconds)은 그대로 유지된다.
+          properties:
+            enabled:
+              type: boolean
+              description: 게이팅 활성 여부(AI_GATE_ENABLED)
+            open:
+              type: boolean
+              description: 현재 송신 중인지(false = 무음 게이팅 중)
+            closes:
+              type: integer
+              description: 게이트가 닫힌 횟수(= 감지한 무음 구간 수)
+            sent_seconds:
+              type: number
+              description: OpenAI 로 실제 전송한 오디오 길이(초)
+            gated_seconds:
+              type: number
+              description: 무음으로 판정해 전송하지 않은 길이(초) = 절감분
+            gated_ratio:
+              type: number
+              description: gated_seconds / (sent+gated) — 절감 비율(0.0~1.0)
 
     AiChannel:
       type: object
