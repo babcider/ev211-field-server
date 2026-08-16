@@ -269,6 +269,21 @@ async def main() -> int:
         print(f"자막 패킷 {len(listener.captions)}건")
         print(f"  원문: {source_text[:120]}")
         print(f"  번역: {target_text[:120]}")
+        # 발화 경계(계약 §6c v1.7) — kind 별로 utterance_id 순서대로 묶어 문장 분리를 확인한다.
+        for kind in ("source", "target"):
+            groups: list[tuple[int, str]] = []
+            for c in listener.captions:
+                if c.get("kind") != kind:
+                    continue
+                uid = c.get("utterance_id")
+                if groups and groups[-1][0] == uid:
+                    groups[-1] = (uid, groups[-1][1] + c.get("delta", ""))
+                else:
+                    groups.append((uid, c.get("delta", "")))
+            if groups:
+                print(f"  발화 분리({kind}) — {len(groups)}개")
+                for uid, text in groups:
+                    print(f"    utterance_id={uid}: {text.strip()[:90]}")
         print(f"저장: {args.out}")
         audio_ok = listener.peak_rms > SILENCE_RMS and worker.get("seq", 0) > 0
         caption_ok = bool(target_text)

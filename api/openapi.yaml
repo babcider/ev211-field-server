@@ -678,7 +678,18 @@ paths:
 
         **자막**: 워커는 원문·번역 자막 델타를 LiveKit **data 패킷**(topic `captions`)으로
         발행한다. 페이로드는 `{channel_id, track_name, kind(source|target), language, seq,
-        delta}` JSON 이다. 청취 클라이언트는 오디오 구독과 별개로 이 topic 을 받아 렌더한다.
+        utterance_id, delta}` JSON 이다. 청취 클라이언트는 오디오 구독과 별개로 이 topic 을
+        받아 렌더한다.
+
+        **발화 경계(`utterance_id`, 계약 §6c v1.7)**: `seq` 는 전체 단조 증가(순서·유실 판정),
+        `utterance_id` 는 한 발화 안에서 유지되고 발화가 바뀌면 커진다 — 앱은 값이 달라지는
+        지점을 경계로 삼는다(구 "무음 4초" 휴리스틱 대체). `kind` 별로 독립 채번하므로 앱은
+        `(kind, utterance_id)` 로 묶는다. gpt-realtime-translate 스트림에는 발화 완료 신호가
+        없어(실키 조사: delta 3종 + session.created/updated 뿐) 워커가 직접 채번한다 —
+        **주 규칙은 문장 종결 부호**이고, `AI_UTTERANCE_GAP_SECONDS`(8초) 경과는 종결 부호
+        없이 끊긴 발화를 회수하는 폴백이다. 시간 간격을 주 규칙으로 쓸 수 없는 이유는 번역
+        스트림의 발화 **안** 정체(실측 2.61초)가 발화 **사이** 간격(2.23초)보다 길기 때문이다.
+        값은 불투명하며 워커 재시작 시 1부터 다시 시작할 수 있다.
 
         **무중단**: 워커는 OpenAI 세션 한계(60분) 전 T-5분에 둘째 WS 를 워밍해 원자적으로
         교체한다(make-before-break). 교체 중에도 LiveKit 트랙은 유지되어 청취가 끊기지 않는다.

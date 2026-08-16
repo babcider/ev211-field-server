@@ -13,7 +13,9 @@ from app.translate_worker import (
     SilenceGate,
     TranslateSessionError,
     TranslateWorker,
+    UtteranceTracker,
     decode_output_delta,
+    ends_utterance,
     output_frame_samples,
     pcm_rms,
     pcm_seconds,
@@ -1061,3 +1063,105 @@ def test_gating_preserves_floor_frame_receipt_record():
             await asyncio.gather(send, return_exceptions=True)
 
     _run(body())
+
+
+# ---- T2: 자막 발화 경계(utterance_id · 계약 §6c v1.7) ----
+def test_ends_utterance_recognises_catalog_terminators():
+    assert ends_utterance("Hello world.") is True
+    assert ends_utterance("정말요?") is True
+    assert ends_utterance("좋아요! ") is True  # 꼬리 공백은 무시
+    assert ends_utterance("こんにちは。") is True  # CJK 전각
+    assert ends_utterance("नमस्ते।") is True  # 힌디 danda
+    assert ends_utterance("이어지는") is False
+    assert ends_utterance("") is False
+    assert ends_utterance("   ") is False
+
+
+def test_utterance_id_holds_within_one_utterance():
+    """같은 발화 안에서는 id 가 유지된다(완료기준: 발화 내 불변)."""
+    tracker = UtteranceTracker(gap_seconds=2.0)
+    ids = [
+        tracker.next_id("target", d, now=t)
+        for t, d in [(0.0, "오늘"), (0.3, " 예배"), (0.9, "에"), (1.4, " 오신")]
+    ]
+    assert ids == [1, 1, 1, 1]
+
+
+def test_utterance_id_advances_on_terminal_punctuation():
+    """종결 부호 뒤 델타부터 새 발화 — 짧은 호흡의 연속 문장도 갈린다(규칙 1)."""
+    tracker = UtteranceTracker(gap_seconds=2.0)
+    seq = [(0.0, "안녕"), (0.2, "하세요."), (0.5, " 성경"), (0.8, "을 펴세요."), (1.0, " 감사")]
+    ids = [tracker.next_id("target", d, now=t) for t, d in seq]
+    # 종결 부호가 붙은 델타는 그 발화의 마지막이고, 다음 델타가 번호를 올린다.
+    assert ids == [1, 1, 2, 2, 3]
+
+
+def test_utterance_id_advances_on_delta_gap_fallback():
+    """종결 부호 없이 끊긴 발화는 폴백 임계를 넘겨야 갈린다(규칙 2)."""
+    tracker = UtteranceTracker(gap_seconds=8.0)
+    ids = [
+        tracker.next_id("target", d, now=t)
+        for t, d in [(0.0, "말끝을"), (0.5, " 흐리는"), (20.0, " 다음"), (20.4, " 문장")]
+    ]
+    assert ids == [1, 1, 2, 2]
+
+
+def test_model_stall_within_utterance_does_not_split():
+    """게이팅으로 모델이 문장 꼬리를 늦게 뱉어도(실측 2.61초) 발화가 쪼개지지 않는다.
+
+    실측 근거(2026-08-16, 게이팅 ON): 번역 스트림의 발화 **안** 정체 2.61초 >
+    발화 **사이** 간격 2.23초. 시간 간격을 주 규칙으로 쓰면 문장 중간이 끊긴다 —
+    실제 E2E 에서 "…환영" / "합니다." 로 오분할된 회귀를 이 테스트가 잠근다.
+    """
+    tracker = UtteranceTracker(gap_seconds=8.0)
+    observed = [
+        (7.06, "합니다"),  # 발화 1 본문
+        (9.67, "."),       # +2.61초 — 게이팅으로 늦게 도착한 같은 발화의 꼬리
+        (11.90, " 성"),    # +2.23초 — 종결 부호 뒤이므로 여기서 발화 2 시작
+        (12.12, "경"),
+    ]
+    ids = [tracker.next_id("target", d, now=t) for t, d in observed]
+    assert ids == [1, 1, 2, 2]
+
+
+def test_utterance_ids_are_numbered_per_kind():
+    """원문·번역은 스트림 지연이 달라 독립 채번한다 — 번역 발화의 꼬리가 밀리지 않게."""
+    tracker = UtteranceTracker(gap_seconds=2.0)
+    # 원문이 2번째 발화로 넘어간 뒤에도 번역 1번째 발화의 꼬리는 1 을 유지해야 한다.
+    assert tracker.next_id("source", "Hello.", now=0.0) == 1
+    assert tracker.next_id("target", "안녕", now=1.0) == 1
+    assert tracker.next_id("source", " Please", now=1.5) == 2  # 원문 2번째 발화 시작
+    assert tracker.next_id("target", "하세요.", now=2.0) == 1  # 번역은 아직 1번째
+    assert tracker.next_id("target", " 성경", now=2.4) == 2
+
+
+def test_caption_payload_carries_utterance_id():
+    """자막 data 패킷에 utterance_id 가 실리고 발화가 바뀌면 값이 바뀐다(seq 는 계속 증가)."""
+    import json as _json
+
+    worker = TranslateWorker(_params(), session_factory=lambda: FakeSession())
+    worker._room = FakeRoom()
+    worker.utterances = UtteranceTracker(gap_seconds=2.0)
+
+    _run(worker._handle_event({"type": "session.output_transcript.delta", "delta": "안녕"}))
+    _run(worker._handle_event({"type": "session.output_transcript.delta", "delta": "하세요."}))
+    _run(worker._handle_event({"type": "session.output_transcript.delta", "delta": " 성경"}))
+
+    bodies = [_json.loads(p.decode()) for p, _r, _t in worker._room.local_participant.published]
+    assert [b["seq"] for b in bodies] == [1, 2, 3]  # seq 는 전체 단조 증가(의미 불변)
+    assert [b["utterance_id"] for b in bodies] == [1, 1, 2]  # 발화는 종결 부호로 갈린다
+
+
+def test_utterance_tracking_survives_caption_publish_failure():
+    """data 발행이 실패해도 발화 번호 상태는 어긋나지 않는다(room 유무와 무관하게 진행)."""
+    worker = TranslateWorker(_params(), session_factory=lambda: FakeSession())
+    worker._room = None  # 아직 룸 미접속
+    worker.utterances = UtteranceTracker(gap_seconds=2.0)
+    _run(worker._handle_event({"type": "session.output_transcript.delta", "delta": "끝."}))
+    worker._room = FakeRoom()
+    _run(worker._handle_event({"type": "session.output_transcript.delta", "delta": "다음"}))
+
+    import json as _json
+
+    body = _json.loads(worker._room.local_participant.published[0][0].decode())
+    assert body["utterance_id"] == 2  # 룸 없던 사이의 종결 부호도 반영됐다

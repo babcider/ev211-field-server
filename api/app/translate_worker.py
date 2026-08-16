@@ -28,6 +28,8 @@ from .config import (
     AI_SESSION_RENEW_SECONDS,
     AI_TRANSLATE_INPUT_MODEL,
     AI_TRANSLATE_URL,
+    AI_UTTERANCE_GAP_SECONDS,
+    AI_UTTERANCE_TERMINATORS,
     AI_WORKER_BACKOFF_BASE_SECONDS,
     AI_WORKER_BACKOFF_MAX_SECONDS,
     AI_WORKER_STOP_TIMEOUT_SECONDS,
@@ -286,6 +288,54 @@ class SilenceGate:
         }
 
 
+def ends_utterance(delta: str, terminators: str = AI_UTTERANCE_TERMINATORS) -> bool:
+    """자막 델타가 문장 종결 부호로 끝나는지 판정한다(순수 — 계약 §6c 채번 규칙 1)."""
+    stripped = delta.rstrip()
+    return bool(stripped) and stripped[-1] in terminators
+
+
+class UtteranceTracker:
+    """자막 발화 경계를 채번한다(계약 §6c v1.7 — 워커 자체 규칙).
+
+    `gpt-realtime-translate` 스트림에는 발화 완료 신호가 없다(실키 조사 결과 delta 3종 +
+    session.created/updated 5종뿐). 그래서 워커가 **직전 델타**를 근거로 다음 델타 도착
+    시점에 번호를 올린다 — 이미 보낸 델타의 번호를 소급 수정하지 않는(지연) 판정이다.
+
+    - `kind` 별 독립 카운터: 원문(source)과 번역(target)은 스트림 지연이 달라 공용 카운터를
+      쓰면 번역 발화의 꼬리가 다음 번호로 잘못 찍힌다.
+    - 규칙 1(주): 직전 델타가 종결 부호로 끝났다 → 다음 델타는 새 발화. 짧은 호흡으로 이어지는
+      연속 문장까지 정확히 갈린다.
+    - 규칙 2(폴백): 직전 델타로부터 gap_seconds 가 지났다 → 새 발화. 종결 부호 없이 끊긴 채
+      방치된 발화를 회수하는 용도이며, **주 규칙이 될 수 없다** — 실측(게이팅 ON)에서 번역
+      스트림은 발화 안 정체가 2.61초로 발화 사이 간격(2.23초)보다 길었다. 시간만으로 가르면
+      문장 중간이 끊긴다(앱의 구 "무음 4초" 휴리스틱이 실패하던 이유).
+    """
+
+    def __init__(
+        self,
+        gap_seconds: float = AI_UTTERANCE_GAP_SECONDS,
+        terminators: str = AI_UTTERANCE_TERMINATORS,
+    ) -> None:
+        self.gap_seconds = gap_seconds
+        self.terminators = terminators
+        # kind → [현재 번호, 직전 델타 시각, 직전 델타가 종결 부호로 끝났는지]
+        self._state: dict[str, list] = {}
+
+    def next_id(self, kind: str, delta: str, now: float | None = None) -> int:
+        """델타 1건의 `utterance_id` 를 돌려주고 상태를 갱신한다."""
+        at = time.monotonic() if now is None else now
+        ended = ends_utterance(delta, self.terminators)
+        state = self._state.get(kind)
+        if state is None:
+            self._state[kind] = [1, at, ended]
+            return 1
+        if state[2] or (at - state[1]) >= self.gap_seconds:
+            state[0] += 1
+        state[1] = at
+        state[2] = ended
+        return state[0]
+
+
 # ---- 번역 워커 ----
 @dataclass
 class AiWorkerParams:
@@ -350,6 +400,8 @@ class TranslateWorker:
         self._caption_failed = False  # 자막 발행 실패 warning 을 1회로 제한
         # 무음 구간 append 게이팅(T1) — OpenAI 송신만 멈추고 세션·프레임 수신 기록은 유지한다.
         self.gate = SilenceGate()
+        # 자막 발화 경계 채번(T2 · 계약 §6c v1.7) — kind 별 독립 카운터.
+        self.utterances = UtteranceTracker()
 
         # 헬스 지표(슈퍼바이저·status 엔드포인트가 읽는다).
         self.seq: int = 0  # 발행한 번역 오디오 프레임 수(순서·진행 확인용)
@@ -679,6 +731,9 @@ class TranslateWorker:
             return
         if self._on_transcript is not None:
             self._on_transcript(kind, delta)
+        # 발화 번호는 room 유무와 무관하게 항상 진행시킨다 — data 채널이 없어도(단위 테스트·
+        # 발행 실패) 경계 판정 상태가 어긋나지 않게.
+        utterance_id = self.utterances.next_id(kind, delta)
         if self._room is None:
             return
         self.caption_seq += 1
@@ -689,6 +744,8 @@ class TranslateWorker:
                 "kind": kind,
                 "language": self._params.target_language if kind == "target" else None,
                 "seq": self.caption_seq,
+                # 발화 경계(계약 §6c v1.7) — 같은 발화 안에서 유지, 발화가 바뀌면 증가.
+                "utterance_id": utterance_id,
                 "delta": delta,
             },
             ensure_ascii=False,
