@@ -3,6 +3,8 @@
 .env
 .env.local
 .env.tmp
+.env.*
+!.env.example
 
 # Python 개발 산출물
 __pycache__/
