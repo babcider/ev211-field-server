@@ -2,7 +2,28 @@
 
 EV211 앱이 같은 Wi-Fi 안에서 음성을 송신·수신하고 무전기 채널을 사용할 수 있게 하는 자체 호스팅 서버입니다. 인터넷 연결 없이도 LiveKit 음성 중계, 채널 관리 API, 관리자 화면이 로컬 Ubuntu 서버에서 동작합니다.
 
-이 저장소에는 로컬 서버 코드만 있습니다. EV211 클라우드, AI 번역, 결제, 데스크톱 앱, Android·iOS 앱 소스는 포함하지 않습니다. 앱의 `폰서버접속` 모드도 이 서버를 사용하지 않습니다.
+같은 서버 스택을 클라우드에 배포하면 EV211 라이브의 SFU 음성 중계와 AI 실시간 통역도 담당합니다. Rails 웹·결제, Electron Edge, Android·iOS 앱 소스는 포함하지 않으며 앱의 `폰서버접속` 모드도 이 서버를 사용하지 않습니다.
+
+## 저장소 관계
+
+EV211 제품은 역할이 분리된 세 저장소로 관리합니다.
+
+| 저장소 | 책임 | 이 저장소와의 관계 |
+| --- | --- | --- |
+| [`babcider/ev211`](https://github.com/babcider/ev211) | Rails 중앙 서비스와 Electron Edge | 라이브와 계정을 소유하며, 이 서버의 송신 권한 콜백과 사용량 보고를 처리합니다. |
+| [`babcider/ev211-mobile`](https://github.com/babcider/ev211-mobile) | Flutter iOS·Android 앱 | 이 서버의 채널 API와 LiveKit에 연결해 음성을 송신·수신하고 관리자·무전기 기능을 사용합니다. |
+| [`babcider/ev211-field-server`](https://github.com/babcider/ev211-field-server) | FastAPI·LiveKit 현장·클라우드 음성 서버 | 현재 저장소이며 채널 원장, 토큰 발급, 음성 중계, 녹음과 AI 통역을 담당합니다. |
+
+운영 모드별 관계는 다음과 같습니다.
+
+- 내부망 로컬서버 모드에서는 모바일 앱이 이 서버에 직접 연결하며 `ev211` Rails는 필요하지 않습니다.
+- 클라우드 라이브 모드에서는 `ev211` Rails가 라이브와 접속코드를 소유하고, 모바일 앱이 Rails 응답으로 받은 이 서버의 주소에 연결합니다.
+- 이 서버는 클라우드 라이브의 송신 비밀번호를 `ev211` Rails에 확인하고 참가자 사용량을 Rails로 보고합니다.
+- 모바일 앱의 폰서버 모드는 휴대폰끼리 직접 연결하므로 이 서버를 사용하지 않습니다.
+
+## 로컬 보조 worktree
+
+로컬 보조 worktree는 `.worktrees/` 아래에 둡니다. `hotfix/offline-web-publish` 작업본은 `.worktrees/ev211-field-server-offline-hotfix`에 보존하며, 세부 내용은 [worktree 안내](.worktrees/README.md)를 확인합니다.
 
 ## 주요 기능
 
