@@ -30,3 +30,7 @@ web/tokens.html
 backups/
 *.tar.gz
 field-root-ca.crt
+
+# 로컬 보조 Git worktree는 저장소 안의 전용 디렉터리에 모은다.
+/.worktrees/*
+!/.worktrees/README.md
