@@ -30,6 +30,13 @@ def test_https_root_serves_public_listener_page_without_admin_redirect():
     assert "redir * /admin.html" not in caddyfile
 
 
+def test_linux_caddy_signaling_proxy_uses_the_server_lan_ip():
+    host_overlay = (ROOT / "docker-compose.host.yml").read_text()
+
+    assert 'LIVEKIT_UPSTREAM: "${FIELD_NODE_IP:-127.0.0.1}:7880"' in host_overlay
+    assert "host.docker.internal:host-gateway" not in host_overlay.split("  caddy:", 1)[1]
+
+
 def test_operator_logout_returns_to_public_listener_page():
     page = (ROOT / "web" / "admin.html").read_text()
 
@@ -47,3 +54,26 @@ def test_public_and_operator_pages_include_english_language_switching():
     assert "EV211 Interpretation Listener" in listener
     assert "EV211 Field Console" in operator
     assert "localStorage.getItem(storageKey)" in i18n
+
+
+def test_browser_room_connections_use_the_page_origin_for_signaling():
+    listener = (ROOT / "web" / "index.html").read_text()
+    operator = (ROOT / "web" / "admin.html").read_text()
+
+    assert "defaultWsUrl(grant.url)" not in listener
+    assert "defaultWsUrl(grant.url)" not in operator
+    assert "new URL(advertisedUrl)" not in listener
+    assert "new URL(advertisedUrl)" not in operator
+    assert "wss://${host}:8443" in listener
+    assert "wss://${h}:8443" in operator
+
+
+def test_browser_sender_can_choose_48_or_96_kbps_audio_quality():
+    page = (ROOT / "web" / "admin.html").read_text()
+
+    assert 'id="audioQuality"' in page
+    assert 'value="music"' in page
+    assert 'value="musicHighQuality"' in page
+    assert "LK.AudioPresets.music" in page
+    assert "audioPreset: selectedAudioPreset()" in page
+    assert "$('audioQuality').disabled = true;" in page

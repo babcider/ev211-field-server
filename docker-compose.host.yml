@@ -39,8 +39,8 @@ services:
       LIVEKIT_RTC_URL: "ws://host.docker.internal:7880"
 
   caddy:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
-      # /rtc wss 프록시 업스트림 — host 네트워크의 livekit 으로 변경.
-      LIVEKIT_UPSTREAM: "host.docker.internal:7880"
+      # /rtc WSS 프록시는 Docker host-gateway 별칭 대신 서버의 실제 LAN IP로 LiveKit에
+      # 직접 연결한다. 외부 HTTPS(:8443) 단말의 signaling 경로가 Docker 별칭 해석에
+      # 의존하지 않도록 한다.
+      LIVEKIT_UPSTREAM: "${FIELD_NODE_IP:-127.0.0.1}:7880"

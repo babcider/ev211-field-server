@@ -43,7 +43,7 @@ http://localhost:8880 {
 	# LiveKit signaling ws 프록시 (http 경로에서는 ws). 웹 페이지 기본값이 여기로 붙는다.
 	handle /rtc* {
 		# 기본은 도커 브리지 DNS(livekit:7880). Linux host-mode 오버레이는
-		# LIVEKIT_UPSTREAM=host.docker.internal:7880 으로 오버라이드한다.
+		# LIVEKIT_UPSTREAM=<FIELD_NODE_IP>:7880 으로 오버라이드한다.
 		reverse_proxy {$LIVEKIT_UPSTREAM:livekit:7880}
 	}
 	# field-api 제어 평면 프록시. /api 프리픽스를 스트립해 field-api:8000 으로 전달한다.
@@ -74,7 +74,7 @@ localhost:8443, 127.0.0.1:8443, {$FIELD_NODE_IP:127.0.0.1}:8443 {
 	# LiveKit signaling wss 프록시. https 페이지는 mixed content 회피 위해 wss(/rtc)로 접속.
 	handle /rtc* {
 		# 기본은 도커 브리지 DNS(livekit:7880). Linux host-mode 오버레이는
-		# LIVEKIT_UPSTREAM=host.docker.internal:7880 으로 오버라이드한다.
+		# LIVEKIT_UPSTREAM=<FIELD_NODE_IP>:7880 으로 오버라이드한다.
 		reverse_proxy {$LIVEKIT_UPSTREAM:livekit:7880}
 	}
 	# field-api 제어 평면 프록시(https). /api 프리픽스를 스트립해 field-api:8000 으로 전달한다.

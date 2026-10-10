@@ -106,11 +106,12 @@
       if (channels.length) renderChannels();
     };
 
+    // 브라우저는 페이지를 실제로 연 같은 서버 주소로 signaling 한다. 토큰의 url 값은
+    // 모바일 앱용이라 FIELD_NODE_IP가 오래됐을 때 127.0.0.1을 가리킬 수 있다.
     function defaultWsUrl() {
       const host = location.hostname;
-      if (location.protocol === 'https:') return `wss://${host}:8443`;
       if (host === 'localhost' || host === '127.0.0.1') return 'ws://localhost:7880';
-      return `wss://${host}:8443`;
+      return location.protocol === 'https:' ? `wss://${host}:8443` : `ws://${host}:7880`;
     }
 
     async function api(path, options = {}) {
