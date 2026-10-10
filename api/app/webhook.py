@@ -68,7 +68,10 @@ class WebhookProcessor:
             await self._on_track_published(event)
         elif kind == "track_unpublished":
             await self._on_track_unpublished(event)
-        elif kind == "participant_left":
+        elif kind in ("participant_left", "participant_connection_aborted"):
+            # connection_aborted: signaling 만 붙고 미디어(ICE) 접속에 실패한 경우 —
+            # joined 없이 끝나므로 left 와 동일하게 lease 를 즉시 해제한다(접속 실패 후
+            # join grace 동안의 가짜 409 방지).
             await self._on_left(event)
         # 그 외 이벤트(room_started 등)는 무시(처리 성공으로 간주).
 
