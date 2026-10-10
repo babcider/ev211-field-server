@@ -114,6 +114,21 @@ def test_left_releases_only_matching_identity(state):
     assert state.db.get_lease(1) is None
 
 
+def test_connection_aborted_releases_unjoined_lease(state):
+    """미디어 접속 실패(connection_aborted) → 미접속 lease 즉시 해제, 재발급 가능."""
+    proc = WebhookProcessor(state)
+    state.db.create_channel(1, "ko", "한국어")
+    ident = _lease_and_identity(state)
+    # stale aborted(다른 identity) → 무시.
+    _run(proc.handle(_event("participant_connection_aborted", "speaker-ch-01-e1-g1-nSTALE0", "a1")))
+    assert state.db.get_lease(1) is not None
+    # 정확 일치 aborted → 해제.
+    _run(proc.handle(_event("participant_connection_aborted", ident, "a2")))
+    assert state.db.get_lease(1) is None
+    ok, _ident = state.db.acquire_lease(1, 1, state.generation, new_nonce(), PUBLISH_TTL_SECONDS, 120)
+    assert ok
+
+
 def test_webhook_idempotent(state):
     proc = WebhookProcessor(state)
     state.db.create_channel(1, "ko", "한국어")

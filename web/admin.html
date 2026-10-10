@@ -880,6 +880,33 @@
       setSendStatus(t('checkingChannel', { channel: channelId }));
       let localTrack = null;
       try {
+        // 마이크를 토큰 발급·룸 접속보다 먼저 잡는다 — Firefox 는 캡처 중이 아니면 host ICE
+        // 후보를 mDNS 로 가려 내부망 미디어 접속이 실패한다. 마이크 실패 시 lease 도 잡지 않는다.
+        $('startBtn').textContent = t('connectingMic');
+        const selectedMic = $('mic').selectedOptions[0]?.textContent || t('defaultMic');
+        setSendStatus(t('connectingMicStatus', { microphone: selectedMic }));
+        log(t('connectingMicLog', { microphone: selectedMic }));
+        // 가상 장치(Voicemeeter 등) 루프백 캡처는 브라우저 전처리(AEC/NS/AGC)가
+        // 신호를 에코·노이즈로 오인해 무음이 되므로 그 경우에만 전처리를 끈다.
+        // 실제 마이크는 전처리를 유지해야 원시 잡음·험이 그대로 송출되지 않는다.
+        const rawCapture = isVirtualMicLabel(selectedMic);
+        if (rawCapture) log('가상 오디오 장치 감지(' + selectedMic + ') → 원음 모드(브라우저 전처리 해제)');
+        localTrack = await withTimeout(
+          LK.createLocalAudioTrack(
+            rawCapture
+              ? {
+                  deviceId: $('mic').value || undefined,
+                  echoCancellation: false,
+                  noiseSuppression: false,
+                  autoGainControl: false,
+                  channelCount: 1,
+                }
+              : { deviceId: $('mic').value || undefined },
+          ),
+          10000,
+          t('micTimeout'),
+        );
+
         // 채널이 없으면 개설(이미 있으면 409 무시하고 발급 진행).
         log(t('prepareChannel', { channel: channelId }));
         try {
@@ -915,30 +942,6 @@
           t('voiceTimeout'),
         );
 
-        $('startBtn').textContent = t('connectingMic');
-        const selectedMic = $('mic').selectedOptions[0]?.textContent || t('defaultMic');
-        setSendStatus(t('connectingMicStatus', { microphone: selectedMic }));
-        log(t('connectingMicLog', { microphone: selectedMic }));
-        // 가상 장치(Voicemeeter 등) 루프백 캡처는 브라우저 전처리(AEC/NS/AGC)가
-        // 신호를 에코·노이즈로 오인해 무음이 되므로 그 경우에만 전처리를 끈다.
-        // 실제 마이크는 전처리를 유지해야 원시 잡음·험이 그대로 송출되지 않는다.
-        const rawCapture = isVirtualMicLabel(selectedMic);
-        if (rawCapture) log('가상 오디오 장치 감지(' + selectedMic + ') → 원음 모드(브라우저 전처리 해제)');
-        localTrack = await withTimeout(
-          LK.createLocalAudioTrack(
-            rawCapture
-              ? {
-                  deviceId: $('mic').value || undefined,
-                  echoCancellation: false,
-                  noiseSuppression: false,
-                  autoGainControl: false,
-                  channelCount: 1,
-                }
-              : { deviceId: $('mic').value || undefined },
-          ),
-          10000,
-          t('micTimeout'),
-        );
         await withTimeout(
           room.localParticipant.publishTrack(localTrack, {
             name: grant.track_name,
