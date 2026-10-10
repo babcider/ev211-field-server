@@ -206,6 +206,13 @@
           <option value="musicHighQuality" data-i18n="audioQuality96" selected>96 kbps · 고음질</option>
         </select>
       </div>
+      <div>
+        <label data-i18n="audioProcessing">음성 처리</label>
+        <select id="audioProcessing" style="width:100%">
+          <option value="auto" data-i18n="audioProcessingAuto" selected>자동 · 마이크 보정</option>
+          <option value="raw" data-i18n="audioProcessingRaw">원음 · 보정 끔</option>
+        </select>
+      </div>
       <div style="flex:0"><button id="startBtn" type="button">송신 시작</button></div>
       <div style="flex:0"><button id="stopBtn" type="button" class="danger" disabled>송신 정지</button></div>
     </div>
@@ -239,6 +246,16 @@
     strings.en.audioQuality = 'Audio quality';
     strings.en.audioQuality48 = '48 kbps · listener capacity';
     strings.en.audioQuality96 = '96 kbps · high quality';
+    strings.ko.audioProcessing = '음성 처리';
+    strings.ko.audioProcessingAuto = '자동 · 마이크 보정';
+    strings.ko.audioProcessingRaw = '원음 · 보정 끔';
+    strings.ko.rawModeVirtual = '가상 오디오 장치 감지({microphone}) → 원음 모드(브라우저 전처리 해제)';
+    strings.ko.rawModeSelected = '원음 모드 선택됨 → 브라우저 전처리(에코 제거·잡음 억제·자동 음량) 해제';
+    strings.en.audioProcessing = 'Voice processing';
+    strings.en.audioProcessingAuto = 'Auto · microphone cleanup';
+    strings.en.audioProcessingRaw = 'Raw · cleanup off';
+    strings.en.rawModeVirtual = 'Virtual audio device detected ({microphone}) → raw mode (browser processing off)';
+    strings.en.rawModeSelected = 'Raw mode selected → browser processing (echo cancellation, noise suppression, auto gain) off';
     let translateDynamic = () => {};
     const i18n = window.EV211I18n.create(strings, () => translateDynamic());
     const t = (key, values) => i18n.t(key, values);
@@ -871,6 +888,14 @@
       return /voicemeeter|vb-audio|vb audio|virtual|blackhole|soundflower|loopback|\bcable\b/i.test(label || '');
     }
 
+    // 음성 처리 선택은 이 브라우저에 기억한다(저장 불가 환경에서는 기본값 '자동').
+    try {
+      if (localStorage.getItem('ev211.audioProcessing') === 'raw') $('audioProcessing').value = 'raw';
+    } catch (_) { /* 저장소 접근 불가 */ }
+    $('audioProcessing').addEventListener('change', () => {
+      try { localStorage.setItem('ev211.audioProcessing', $('audioProcessing').value); } catch (_) { /* 저장소 접근 불가 */ }
+    });
+
     async function loadMics() {
       try {
         const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -897,6 +922,7 @@
       }
       $('startBtn').disabled = true;
       $('audioQuality').disabled = true;
+      $('audioProcessing').disabled = true;
       $('startBtn').textContent = t('preparing');
       setSendStatus(t('checkingChannel', { channel: channelId }));
       let localTrack = null;
@@ -910,8 +936,11 @@
         // 가상 장치(Voicemeeter 등) 루프백 캡처는 브라우저 전처리(AEC/NS/AGC)가
         // 신호를 에코·노이즈로 오인해 무음이 되므로 그 경우에만 전처리를 끈다.
         // 실제 마이크는 전처리를 유지해야 원시 잡음·험이 그대로 송출되지 않는다.
-        const rawCapture = isVirtualMicLabel(selectedMic);
-        if (rawCapture) log('가상 오디오 장치 감지(' + selectedMic + ') → 원음 모드(브라우저 전처리 해제)');
+        // 믹서·오디오 인터페이스처럼 라벨로 판별할 수 없는 입력은 '원음' 선택으로 직접 끈다.
+        const rawSelected = $('audioProcessing').value === 'raw';
+        const rawCapture = rawSelected || isVirtualMicLabel(selectedMic);
+        if (rawSelected) log(t('rawModeSelected'));
+        else if (rawCapture) log(t('rawModeVirtual', { microphone: selectedMic }));
         localTrack = await withTimeout(
           LK.createLocalAudioTrack(
             rawCapture
@@ -1011,6 +1040,7 @@
         $('startBtn').disabled = false;
         $('stopBtn').disabled = true;
         $('audioQuality').disabled = false;
+        $('audioProcessing').disabled = false;
       }
     };
 
@@ -1098,6 +1128,7 @@
       $('startBtn').disabled = false;
       $('stopBtn').disabled = true;
       $('audioQuality').disabled = false;
+      $('audioProcessing').disabled = false;
       if (refreshAfter) {
         if (sessionMode === 'admin') refresh();
         if (sessionMode === 'sender') senderRefresh();
